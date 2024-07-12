@@ -764,7 +764,7 @@ def build(model: PretrainedModel, build_config: BuildConfig) -> Engine:
 
         inputs = model.prepare_inputs(**prepare_input_args)
         model(**inputs)
-
+        for k, v in model.named_parameters(): print(k, v.value.shape, v.value.dtype)
         if build_config.enable_debug_output:
             for k, v in model.named_network_outputs():
                 network._mark_output(v, k, str_dtype_to_trt(model.config.dtype))

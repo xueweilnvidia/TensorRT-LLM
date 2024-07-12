@@ -93,7 +93,12 @@ class IpcMemory():
         Call close_ipc_handle with the *buffer*.
         """
         from mpi4py import MPI
-        comm = MPI.COMM_WORLD.Split(mapping.pp_rank, mapping.tp_rank)
+        # comm = MPI.COMM_WORLD.Split(mapping.pp_rank, mapping.tp_rank)
+        # comm = MPI.COMM_WORLD.Split(mapping.pp_rank*mapping.cp_size +
+        #     mapping.cp_rank, mapping.tp_rank)
+        comm = MPI.COMM_WORLD.Split(
+            mapping.pp_rank * mapping.tp_size * mapping.cp_size +
+            mapping.cp_rank, mapping.tp_rank)
 
         error, local_ptr = cudart.cudaMalloc(size)
         _raise_if_error(error)

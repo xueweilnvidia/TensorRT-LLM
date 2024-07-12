@@ -411,6 +411,12 @@ class Tensor(object):
         '''
         return view(self, shape, zero_is_placeholder)
 
+    def flatten(self, start_dim=0, end_dim=-1):
+        '''
+        See functional.flatten.
+        '''
+        return flatten(self, start_dim, end_dim)
+
     def permute(self, dims):
         '''
         See functional.permute.
@@ -488,6 +494,12 @@ class Tensor(object):
         See functional.split.
         '''
         return split(self, split_size_or_sections, dim)
+
+    def unbind(self, dim=0):
+        '''
+        See functional.unbind.
+        '''
+        return unbind(self, dim)
 
     def is_dynamic(self, dim=None):
         '''
@@ -630,14 +642,13 @@ class PositionEmbeddingType(IntEnum):
     learned_absolute = 0
     rope_gptj = 1
     rope_gpt_neox = 2
-    long_rope = 3
-    alibi = 4
-    alibi_with_scale = 5
-    relative = 6
-    chatglm = 7
+    alibi = 3
+    alibi_with_scale = 4
+    relative = 5
+    chatglm = 6
 
     def is_rope(self) -> bool:
-        return self in [self.rope_gptj, self.rope_gpt_neox, self.long_rope]
+        return self in [self.rope_gptj, self.rope_gpt_neox]
 
     def is_alibi(self) -> bool:
         return self in [self.alibi, self.alibi_with_scale]
@@ -1525,6 +1536,44 @@ def view(input: Tensor,
     return _create_tensor(layer.get_output(0), layer)
 
 
+def flatten(input: Tensor, start_dim: int = 0, end_dim: int = -1):
+    '''
+    Flattens input by reshaping it into a one-dimensional tensor.
+
+    If start_dim or end_dim are passed, only dimensions starting with start_dim and
+    ending with end_dim are flattened. The order of elements in input is unchanged.
+
+    Parameters:
+        input : Tensor
+            The input tensor to flatten.
+
+        start_dim : int
+            The first dim to flatten.
+
+        end_dim : int
+            The last dim to flatten.
+
+    Returns:
+        The tensor produced by the flatten layer.
+
+    '''
+    shape = input.shape
+    ndim = input.ndim()
+    if start_dim < 0: start_dim += ndim
+    if end_dim < 0: end_dim += ndim
+    new_shape = list()
+    for i in range(start_dim):
+        new_shape.append(shape[i])
+    if end_dim - start_dim >= 0:
+        flat_dim = 1
+        for i in range(start_dim, end_dim + 1):
+            flat_dim *= shape[i]
+        new_shape.append(flat_dim)
+    for i in range(end_dim + 1, ndim):
+        new_shape.append(shape[i])
+    return view(input, new_shape)
+
+
 def expand_dims(input: Tensor, dim: Union[int, Sequence[int]]) -> Tensor:
     '''
     Add an operation to expand the tensor shape with singleton dimensions.
@@ -2134,66 +2183,38 @@ def cumsum(input: Tensor, dim: int) -> Tensor:
 
     dim = dim_resolve_negative(dim, input.ndim())[0]
 
-    if (dim == input.ndim() - 1) and input.size(-1) > 0:
-        old_shape = shape(input)
-        if input.ndim() != 2:
-            input_2d = input.view([-1, input.size(-1)])
-        else:
-            input_2d = input
-        cumsum_last_dim_plg_creator = trt.get_plugin_registry(
-        ).get_plugin_creator('CumsumLastDim', '1', TRT_LLM_PLUGIN_NAMESPACE)
-        assert cumsum_last_dim_plg_creator is not None
-        input_length = trt.PluginField(
-            "input_length", np.array(input_2d.size(-1), dtype=np.int32),
-            trt.PluginFieldType.INT32)
-        pf_type = trt.PluginField("type_id",
-                                  np.array([int(input_2d.dtype)], np.int32),
-                                  trt.PluginFieldType.INT32)
-        pfc = trt.PluginFieldCollection([input_length, pf_type])
-        cumsum_last_dim_plug = cumsum_last_dim_plg_creator.create_plugin(
-            "cumsum_last_dim", pfc)
-        plug_inputs = [input_2d]
-        plug_inputs = [i.trt_tensor for i in plug_inputs]
-        layer = default_trtnet().add_plugin_v2(plug_inputs,
-                                               cumsum_last_dim_plug)
-        _add_plugin_info(layer, cumsum_last_dim_plg_creator, "cumsum_last_dim",
-                         pfc)
-        output = _create_tensor(layer.get_output(0), layer)
-        output = output.view(old_shape)
-        return output
-    else:
-        slice_shape = []
-        for i in range(input.ndim()):
-            if i != dim:
-                slice_shape.append(shape(input, i))
+    slice_shape = []
+    for i in range(input.ndim()):
+        if i != dim:
+            slice_shape.append(shape(input, i))
 
-        zero_tensor = constant_to_tensor_(0, input.dtype, False)
-        if len(slice_shape) > 0:
-            zero_tensor = expand_dims(zero_tensor,
-                                      [i for i in range(len(slice_shape))])
-            slice_shape = concat(slice_shape)
-            zero_tensor = expand(zero_tensor, slice_shape)
+    zero_tensor = constant_to_tensor_(0, input.dtype, False)
+    if len(slice_shape) > 0:
+        zero_tensor = expand_dims(zero_tensor,
+                                  [i for i in range(len(slice_shape))])
+        slice_shape = concat(slice_shape)
+        zero_tensor = expand(zero_tensor, slice_shape)
 
-        loop_layer = default_trtnet().add_loop()
-        trip_limit = shape(input, dim).trt_tensor
-        loop_layer.add_trip_limit(trip_limit, trt.TripLimit.COUNT)
+    loop_layer = default_trtnet().add_loop()
+    trip_limit = shape(input, dim).trt_tensor
+    loop_layer.add_trip_limit(trip_limit, trt.TripLimit.COUNT)
 
-        iterator_layer = loop_layer.add_iterator(input.trt_tensor, dim)
-        cur_slice = iterator_layer.get_output(0)
+    iterator_layer = loop_layer.add_iterator(input.trt_tensor, dim)
+    cur_slice = iterator_layer.get_output(0)
 
-        running_sum_layer = loop_layer.add_recurrence(zero_tensor.trt_tensor)
-        running_sum = running_sum_layer.get_output(0)
+    running_sum_layer = loop_layer.add_recurrence(zero_tensor.trt_tensor)
+    running_sum = running_sum_layer.get_output(0)
 
-        cur_sum_layer = default_trtnet().add_elementwise(
-            cur_slice, running_sum, trt.ElementWiseOperation.SUM)
-        cur_sum = cur_sum_layer.get_output(0)
-        running_sum_layer.set_input(1, cur_sum)
+    cur_sum_layer = default_trtnet().add_elementwise(
+        cur_slice, running_sum, trt.ElementWiseOperation.SUM)
+    cur_sum = cur_sum_layer.get_output(0)
+    running_sum_layer.set_input(1, cur_sum)
 
-        loop_output_layer = loop_layer.add_loop_output(
-            cur_sum, trt.LoopOutput.CONCATENATE, dim)
-        loop_output_layer.set_input(1, trip_limit)
-        return _create_tensor(loop_output_layer.get_output(0),
-                              loop_output_layer)
+    loop_output_layer = loop_layer.add_loop_output(cur_sum,
+                                                   trt.LoopOutput.CONCATENATE,
+                                                   dim)
+    loop_output_layer.set_input(1, trip_limit)
+    return _create_tensor(loop_output_layer.get_output(0), loop_output_layer)
 
 
 def masked_scatter(input: Tensor, mask: Tensor, source: Tensor) -> Tensor:
@@ -3425,6 +3446,19 @@ def chunk(tensor: Tensor, chunks: int, dim: int = 0) -> Tensor:
     return split(tensor, dim_value // chunks, dim)
 
 
+def unbind(input: Tensor, dim: int = 0):
+    '''
+    Removes a tensor dimension.
+
+    Returns a tuple of all slices along a given dimension, already without it.
+    '''
+    ndim = input.ndim()
+    dim = dim_resolve_negative(dim, input.ndim())[0]
+    outputs = split(input, 1, dim)
+    output_shape = [input.shape[i] for i in range(ndim) if i != dim]
+    return [output.view(output_shape) for output in outputs]
+
+
 class AllReduceStrategy(IntEnum):
     """
     Warning: actual definition is in cpp/tensorrt_llm/kernels/customAllReduceKernels.h
@@ -3901,46 +3935,6 @@ class RopeEmbeddingUtils:
 
         return concat.reshape(1, -1).astype(dtype)
 
-    def create_sinusoidal_positions_long_rope(
-            num_pos: int,
-            num_orig_pos: int,
-            dim: int,
-            theta: float = 10000.0,
-            scaling_short_factors: Tensor = 1.0,
-            scaling_long_factors: Tensor = 1.0,
-            dtype=np.float32):
-
-        def _calc_mscale(scale):
-            if scale <= 1.0:
-                return 1.0
-            return math.sqrt(1 + math.log(scale) / math.log(num_orig_pos))
-
-        mscale = _calc_mscale(num_pos / num_orig_pos)
-
-        def _compute_sinusoidal_positions(scale_factors,
-                                          for_attention_plugin=True):
-            inv_freq = 1 / (scale_factors *
-                            (theta**(np.arange(0, dim, 2) / dim)).astype(dtype))
-            sinusoid_inp = np.einsum("i , j -> i j",
-                                     np.arange(num_pos, dtype=dtype),
-                                     inv_freq,
-                                     dtype=dtype)
-            if for_attention_plugin:
-                sinusoid_inp = np.expand_dims(sinusoid_inp, axis=-1)
-                concat = np.concatenate(
-                    (np.cos(sinusoid_inp), np.sin(sinusoid_inp)), axis=-1)
-            else:
-                concat = np.concatenate(
-                    (np.sin(sinusoid_inp), np.cos(sinusoid_inp)), axis=1)
-                concat = np.expand_dims(concat, axis=0)
-            return concat.astype(dtype) * mscale
-
-        return _compute_sinusoidal_positions(
-            scaling_short_factors, False), _compute_sinusoidal_positions(
-                scaling_long_factors, False), _compute_sinusoidal_positions(
-                    scaling_short_factors, True), _compute_sinusoidal_positions(
-                        scaling_long_factors, True), mscale
-
     @staticmethod
     def rotate_every_two(tensor: Tensor) -> Tensor:
         assert tensor.ndim() == 4
@@ -3993,7 +3987,7 @@ class RopeEmbeddingUtils:
     ) -> Tensor:
 
         rotate_func = None
-        if pos_emb_type == PositionEmbeddingType.rope_gpt_neox or pos_emb_type == PositionEmbeddingType.long_rope:
+        if pos_emb_type == PositionEmbeddingType.rope_gpt_neox:
             assert len(position_embedding) == 2
             cos, sin = position_embedding
             sin = expand_dims(sin, 2)
@@ -4148,8 +4142,6 @@ def gpt_attention(
     rotary_embedding_dim: int = 0,
     rotary_embedding_base: float = 10000.0,
     rotary_embedding_scale_type: RotaryScalingType = RotaryScalingType.none,
-    rotary_embedding_scaling_factors: Optional[Tensor] = None,
-    rotary_embedding_m_scale: Optional[float] = None,
     rotary_embedding_scale: float = 1.0,
     rotary_embedding_max_positions: int = 1024,
     position_embedding_type: PositionEmbeddingType = PositionEmbeddingType.
@@ -4178,8 +4170,8 @@ def gpt_attention(
     host_context_lengths: Optional[Tensor] = None,  # for pad-free input mode
     qkv_bias: Optional[Tensor] = None,
     use_cache: bool = True,
-    spec_decoding_position_offsets: Tensor = None,
-    spec_decoding_packed_mask: Tensor = None,
+    medusa_position_offsets: Tensor = None,
+    medusa_packed_mask: Tensor = None,
 ) -> Tuple[Tensor, Optional[Tensor]]:
     '''
     Add an operation that performs the multi-head attention in GPT-like models.
@@ -4365,15 +4357,15 @@ def gpt_attention(
 
         medusa_generation_lengths: Tensor = None,
             The generation phase tokens' lengths for each sequence.
-            Shape: [batch_size]
+            Shape: [Batch_size]
 
-        spec_decoding_position_offsets: Tensor = None,
-            The speculative decoding tokens's position offsets (shared by all sequences).
-            Shape: [batch_size, num_draft_tokens + 1].
+        medusa_position_offsets: Tensor = None,
+            The generation phase tokens's position offsets (can be different for each sequences).
+            Shape: [bs, max_num_medusa_tokens + 1].
 
-        spec_decoding_packed_mask: Tensor = None,
-            The speculative decoding tokens's attention mask (packed into uint32_t bits).
-            Shape: [batch_size, num_draft_tokens + 1, divUp(num_draft_tokens + 1, 32)].
+        medusa_packed_mask: Tensor = None,
+            The generation phase tokens's packed attention mask (can be different for each sequences).
+            Shape: [bs*(max_num_medusa_tokens+1), divUp(max_num_medusa_tokens + 1, 32)].
 
     Returns:
         The tensor produced by that layer.
@@ -4436,10 +4428,6 @@ def gpt_attention(
         "rotary_embedding_scale",
         np.array(rotary_embedding_scale, dtype=np.float32),
         trt.PluginFieldType.FLOAT32)
-    rotary_embedding_m_scale = trt.PluginField(
-        "rotary_embedding_m_scale",
-        np.array(rotary_embedding_m_scale, dtype=np.float32),
-        trt.PluginFieldType.FLOAT32)
     rotary_embedding_max_positions = trt.PluginField(
         "rotary_embedding_max_positions",
         np.array(rotary_embedding_max_positions, dtype=np.int32),
@@ -4456,9 +4444,9 @@ def gpt_attention(
         "remove_input_padding",
         np.array(np.int8(default_net().plugin_config.remove_input_padding),
                  dtype=np.int8), trt.PluginFieldType.INT8)
-    is_spec_decoding_enabled = trt.PluginField(
-        "is_spec_decoding_enabled",
-        np.array(np.int8(spec_decoding_packed_mask is not None), dtype=np.int8),
+    is_medusa_enabled = trt.PluginField(
+        "is_medusa_enabled",
+        np.array(np.int8(medusa_packed_mask is not None), dtype=np.int8),
         trt.PluginFieldType.INT8)
     p_dtype = default_net().plugin_config.gpt_attention_plugin
     pf_type = trt.PluginField(
@@ -4533,13 +4521,13 @@ def gpt_attention(
         unidirectional, q_scaling, position_embedding_type,
         rotary_embedding_dim, rotary_embedding_base,
         rotary_embedding_scale_type, rotary_embedding_scale,
-        rotary_embedding_m_scale, rotary_embedding_max_positions, tp_size,
-        tp_rank, unfuse_qkv_gemm, context_fmha_type, multi_block_mode,
-        enable_xqa, kv_cache_quant_mode_field, remove_input_padding, mask_type,
+        rotary_embedding_max_positions, tp_size, tp_rank, unfuse_qkv_gemm,
+        context_fmha_type, multi_block_mode, enable_xqa,
+        kv_cache_quant_mode_field, remove_input_padding, mask_type,
         paged_kv_cache, tokens_per_block, pf_type, max_context_length,
         qkv_bias_enabled, do_cross_attention_field, max_distance,
         pos_shift_enabled, dense_context_fmha, use_paged_context_fmha_field,
-        use_fp8_context_fmha_field, use_cache_pf, is_spec_decoding_enabled
+        use_fp8_context_fmha_field, use_cache_pf, is_medusa_enabled
     ])
 
     attn_plug = attn_plg_creator.create_plugin("causal_attn", pfc)
@@ -4583,8 +4571,6 @@ def gpt_attention(
 
     if rotary_cos_sin is not None:
         plug_inputs += [rotary_cos_sin]
-    if rotary_embedding_scaling_factors is not None:
-        plug_inputs += [rotary_embedding_scaling_factors]
 
     if alibi_slopes is not None:
         plug_inputs += [alibi_slopes]
@@ -4601,12 +4587,10 @@ def gpt_attention(
     if qkv_bias is not None:
         plug_inputs += [qkv_bias]
 
-    if spec_decoding_packed_mask is not None:
-        # add position_ids as well only if speculative decoding mode
-        assert spec_decoding_position_offsets is not None
-        plug_inputs += [
-            spec_decoding_packed_mask, spec_decoding_position_offsets
-        ]
+    if medusa_packed_mask is not None:
+        # add position_ids as well only if medusa mode
+        assert medusa_position_offsets is not None
+        plug_inputs += [medusa_packed_mask, medusa_position_offsets]
 
     for idx, i in enumerate(plug_inputs):
         assert i is not None, f"Found None input for {idx} th item in plugin inputs {plug_inputs}"

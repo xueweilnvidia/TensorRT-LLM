@@ -24,7 +24,7 @@ from .._utils import (fp32_array, int32_array, is_same_dtype,
                       trt_dtype_to_str)
 from ..functional import (AttentionMaskType, PositionEmbeddingType,
                           RopeEmbeddingUtils, RotaryScalingType, Tensor, arange,
-                          bert_attention, cast, clip, concat, conditional,
+                          allgather, bert_attention, cast, clip, concat, conditional,
                           constant, embedding, expand, expand_dims, expand_mask,
                           generate_alibi_biases, generate_alibi_slopes,
                           gpt_attention, matmul)
@@ -1091,6 +1091,8 @@ class BertAttention(Module):
                  tp_group=None,
                  tp_size=1,
                  tp_rank=0,
+		 cp_group=None,
+                 cp_size=0,
                  relative_attention=False,
                  max_distance=0,
                  num_buckets=0):
@@ -1108,6 +1110,8 @@ class BertAttention(Module):
         self.tp_group = tp_group
         self.tp_size = tp_size
         self.tp_rank = tp_rank
+        self.cp_group = cp_group
+        self.cp_size = cp_size
 
         self.num_layers = num_layers
         self.apply_query_key_layer_scaling = apply_query_key_layer_scaling
@@ -1198,6 +1202,7 @@ class BertAttention(Module):
 
         if default_net().plugin_config.bert_attention_plugin:
             # TRT plugin mode
+            assert self.cp_size == 1
             assert input_lengths is not None
             context = bert_attention(
                 qkv,
@@ -1223,6 +1228,9 @@ class BertAttention(Module):
             kv_size = self.attention_head_size * self.num_attention_kv_heads
             query, key, value = split(
                 qkv, [self.attention_hidden_size, kv_size, kv_size], dim=2)
+            if self.cp_size > 1 and self.cp_group is not None:
+                key = allgather(key, self.cp_group, gather_dim=1)
+                value = allgather(value, self.cp_group, gather_dim=1)
             query = transpose_for_scores(query)
             key = transpose_for_scores(key)
             value = transpose_for_scores(value)

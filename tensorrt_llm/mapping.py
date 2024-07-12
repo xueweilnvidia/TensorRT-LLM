@@ -30,6 +30,37 @@ class Mapping(object):
     - [1, 5]
     - [2, 6]
     - [3, 7]
+
+    A node with 16 GPUs, cp_size = 4, tp_size = 2, pp_size = 2
+
+    4 cp groups:
+
+    - [0, 1, 2, 3]
+    - [4, 5, 6, 7]
+    - [8, 9, 10, 11]
+    - [12, 13, 14, 15]
+
+    8 tp groups:
+
+    - [0, 4]
+    - [1, 5]
+    - [2, 6]
+    - [3, 7]
+    - [8, 12]
+    - [9, 13]
+    - [10, 14]
+    - [11, 15]
+
+    8 pp groups:
+
+    - [0, 8]
+    - [1, 9]
+    - [2, 10]
+    - [3, 11]
+    - [4, 12]
+    - [5, 13]
+    - [6, 14]
+    - [7, 15]
     '''
 
     def __init__(self,
@@ -37,35 +68,56 @@ class Mapping(object):
                  rank=0,
                  gpus_per_node=8,
                  tp_size=1,
-                 pp_size=1):
+                 pp_size=1,
+                 cp_size=1):
         self.tp_size = tp_size
         self.pp_size = pp_size
+        self.cp_size = cp_size
         self.world_size = world_size
         self.rank = rank
         self.gpus_per_node = gpus_per_node
 
-        if pp_size * tp_size != world_size:
+        if pp_size * tp_size * cp_size != world_size:
             raise ValueError(
-                f"world_size must equal to pp_size * tp_size, but got {world_size} != {pp_size} * {tp_size}"
+                f"world_size must equal to pp_size * tp_size * cp_size, but got {world_size} != {pp_size} * {tp_size} * {cp_size}"
             )
+
         self.pp_groups = []
         self.tp_groups = []
+        self.cp_groups = []
 
         # init pp group
-        for i in range(tp_size):
-            ranks = range(i, world_size, tp_size)
+        for i in range(tp_size * cp_size):
+            ranks = range(i, world_size, tp_size * cp_size)
             self.pp_groups.append(list(ranks))
 
         # init tp group
         for i in range(pp_size):
-            ranks = range(i * tp_size, (i + 1) * tp_size)
-            self.tp_groups.append(list(ranks))
+            for j in range(cp_size):
+                ranks = range(i * tp_size * cp_size + j,
+                              (i + 1) * tp_size * cp_size + j, cp_size)
+                self.tp_groups.append(list(ranks))
 
-        self.pp_rank = self.rank // self.tp_size
-        self.tp_rank = self.rank % self.tp_size
+        # init cp group
+        for i in range(pp_size):
+            for j in range(tp_size):
+                ranks = range(i * tp_size * cp_size + j * cp_size,
+                              i * tp_size * cp_size + (j + 1) * cp_size)
+                self.cp_groups.append(list(ranks))
 
-        self.tp_group = self.tp_groups[self.pp_rank]
-        self.pp_group = self.pp_groups[self.tp_rank]
+        self.pp_rank = self.rank // (self.tp_size * self.cp_size)
+        self.tp_rank = self.rank % (self.tp_size * self.cp_size) // self.cp_size
+        self.cp_rank = self.rank % (self.tp_size * self.cp_size) % self.cp_size
+
+        self.cp_group = self.cp_groups[self.pp_rank * self.tp_size +
+                                       self.tp_rank]
+        self.tp_group = self.tp_groups[self.pp_rank * self.cp_size +
+                                       self.cp_rank]
+        self.pp_group = self.pp_groups[self.tp_rank * self.cp_size +
+                                       self.cp_rank]
+
+    def has_cp(self):
+        return self.cp_size > 1
 
     def has_tp(self):
         return self.tp_size > 1
@@ -80,13 +132,13 @@ class Mapping(object):
         return self.pp_size > 1
 
     def prev_pp_rank(self):
-        p = self.rank - self.tp_size
+        p = self.rank - self.tp_size * self.cp_size
         if p < 0:
             p = p + self.world_size
         return p
 
     def next_pp_rank(self):
-        p = self.rank + self.tp_size
+        p = self.rank + self.tp_size * self.cp_size
         if p >= self.world_size:
             p = p - self.world_size
         return p
@@ -98,6 +150,7 @@ class Mapping(object):
         return list(layers_range)
 
     def ep_experts(self, num_experts: int) -> List[int]:
+        assert self.cp_size == 1
         experts_per_rank = num_experts // self.tp_size
         experts_range = range(self.tp_rank * experts_per_rank,
                               (self.tp_rank + 1) * experts_per_rank)

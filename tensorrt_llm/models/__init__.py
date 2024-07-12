@@ -37,6 +37,9 @@ from .phi.model import PhiForCausalLM, PhiModel
 from .qwen.model import QWenForCausalLM
 from .recurrentgemma.model import RecurrentGemmaForCausalLM
 
+from .tfd.model import TFD
+from .aigv.model import Transformer3DModel
+
 __all__ = [
     'BertModel',
     'BertForQuestionAnswering',
@@ -78,6 +81,8 @@ __all__ = [
     'RecurrentGemmaForCausalLM',
     'CogVLMForCausalLM',
     'SpeculativeDecodingMode',
+
+    'TFD',
 ]
 
 MODEL_MAP = {
@@ -107,4 +112,7 @@ MODEL_MAP = {
     'DbrxForCausalLM': DbrxForCausalLM,
     'RecurrentGemmaForCausalLM': RecurrentGemmaForCausalLM,
     'CogVLMForCausalLM': CogVLMForCausalLM,
+
+    'TFD': TFD,
+    'Transformer3DModel': Transformer3DModel,
 }

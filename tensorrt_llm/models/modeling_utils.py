@@ -129,6 +129,7 @@ class PretrainedConfig:
                  norm_epsilon: float,
                  position_embedding_type: str,
                  world_size: int,
+                 cp_size: int,
                  tp_size: int,
                  pp_size: int,
                  gpus_per_node: int,
@@ -160,6 +161,7 @@ class PretrainedConfig:
         self.embedding_sharding_dim = embedding_sharding_dim
         self.share_embedding_table = share_embedding_table
         self.mapping = Mapping(world_size=world_size,
+                               cp_size=cp_size,
                                tp_size=tp_size,
                                pp_size=pp_size,
                                gpus_per_node=gpus_per_node)
@@ -194,11 +196,11 @@ class PretrainedConfig:
         )  # many config.pop calls inside, make one local copy of the config dict such that the function has no side effects
         architecture = config.pop('architecture')
         dtype = config.pop('dtype')
-        vocab_size = config.pop('vocab_size')
+        vocab_size = config.pop('vocab_size', None)
         hidden_size = config.pop('hidden_size')
         num_hidden_layers = config.pop('num_hidden_layers')
         num_attention_heads = config.pop('num_attention_heads')
-        hidden_act = config.pop('hidden_act')
+        hidden_act = config.pop('hidden_act', None)
         norm_epsilon = config.pop('norm_epsilon', 1e-5)
         position_embedding_type = config.pop('position_embedding_type',
                                              'learned_absolute')
@@ -213,6 +215,7 @@ class PretrainedConfig:
 
         mapping = config.pop('mapping', {})
         world_size = mapping.get('world_size', 1)
+        cp_size = mapping.get('cp_size', 1)
         tp_size = mapping.get('tp_size', 1)
         pp_size = mapping.get('pp_size', 1)
         gpus_per_node = mapping.get('gpus_per_node', 8)
@@ -245,7 +248,7 @@ class PretrainedConfig:
                    max_position_embeddings, hidden_size, num_hidden_layers,
                    num_attention_heads, num_key_value_heads, hidden_act,
                    intermediate_size, norm_epsilon, position_embedding_type,
-                   world_size, tp_size, pp_size, gpus_per_node, quant_config,
+                   world_size, cp_size, tp_size, pp_size, gpus_per_node, quant_config,
                    use_parallel_embedding, embedding_sharding_dim,
                    share_embedding_table, **config)
 
@@ -261,6 +264,7 @@ class PretrainedConfig:
         output['position_embedding_type'] = str(self.position_embedding_type)
         output['mapping'] = {
             'world_size': self.mapping.world_size,
+            'cp_size': self.mapping.cp_size,
             'tp_size': self.mapping.tp_size,
             'pp_size': self.mapping.pp_size,
             'gpus_per_node': self.mapping.gpus_per_node,
@@ -276,6 +280,7 @@ class PretrainedConfig:
     def set_rank(self, rank):
         self.mapping = Mapping(self.mapping.world_size,
                                rank=rank,
+                               cp_size=self.mapping.cp_size,
                                tp_size=self.mapping.tp_size,
                                pp_size=self.mapping.pp_size,
                                gpus_per_node=self.mapping.gpus_per_node)

@@ -62,11 +62,15 @@ class Session(object):
         @param engine_buffer: a buffer holds the serialized TRT engine
         '''
         self._runtime = trt.Runtime(logger.trt_logger)
+        print(0)
         if engine_buffer is not None:
             self._engine = self.runtime.deserialize_cuda_engine(engine_buffer)
+        print(1)
         self._context = self.engine.create_execution_context()
+        print(2)
         with _scoped_stream() as stream:
             self._context.set_optimization_profile_async(0, stream)
+        print(3)
         return self
 
     @staticmethod

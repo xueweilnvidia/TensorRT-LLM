@@ -65,7 +65,7 @@ def main(build_type: str = "Release",
     on_windows = platform.system() == "Windows"
     requirements_filename = "requirements-dev-windows.txt" if on_windows else "requirements-dev.txt"
     build_run(
-        f"\"{sys.executable}\" -m pip install -r {requirements_filename} --extra-index-url https://pypi.ngc.nvidia.com"
+        f"\"{sys.executable}\" -m pip install -r {requirements_filename}"
     )
     # Ensure TRT is installed on windows to prevent surprises.
     reqs = check_output([sys.executable, "-m", "pip", "freeze"])

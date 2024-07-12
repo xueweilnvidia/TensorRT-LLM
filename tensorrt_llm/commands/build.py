@@ -89,6 +89,7 @@ def parse_arguments():
         'value as close as possible to the actual number of tokens on your workload. '
         'Note that this argument might be removed in the future.')
     parser.add_argument('--tp_size', type=int, default=1)
+    parser.add_argument('--cp_size', type=int, default=1)
     parser.add_argument('--pp_size', type=int, default=1)
     parser.add_argument(
         '--max_prompt_embedding_table_size',
@@ -250,9 +251,10 @@ def parse_arguments():
 
 def preprocess_model_config(model_config, **kwargs):
     if model_config.architecture in WEIGHT_LOADER_MODELS:
+        model_config.mapping.cp_size = kwargs['cp_size']
         model_config.mapping.tp_size = kwargs['tp_size']
         model_config.mapping.pp_size = kwargs['pp_size']
-        model_config.mapping.world_size = kwargs['tp_size'] * kwargs['pp_size']
+        model_config.mapping.world_size = kwargs['cp_size'] * kwargs['tp_size'] * kwargs['pp_size']
 
 
 def build_model(build_config: BuildConfig,
@@ -412,6 +414,7 @@ def main():
         'logits_dtype': args.logits_dtype,
         'use_fused_mlp': args.use_fused_mlp,
         'weight_only_precision': args.weight_only_precision,
+        'cp_size': args.cp_size,
         'tp_size': args.tp_size,
         'pp_size': args.pp_size,
         'lora_dir': args.lora_dir,
