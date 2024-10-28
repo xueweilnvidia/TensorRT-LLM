@@ -26,10 +26,10 @@
 #include <string>
 #include <vector>
 
-namespace tensorrt_llm::plugins
+namespace nvinfer1
 {
 
-class BertAttentionPlugin : public BasePlugin
+class BertAttentionPlugin : public tensorrt_llm::plugins::BasePlugin
 {
 public:
     BertAttentionPlugin() = delete;
@@ -93,11 +93,11 @@ private:
     int mSM = tensorrt_llm::common::getSMVersion();
 
     // The default copy constructor will leave them as nullptr. clone() shall initialize it.
-    UniqPtrWNullCopy<tensorrt_llm::kernels::FusedMHARunnerV2> mFMHARunner;
-    UniqPtrWNullCopy<tensorrt_llm::common::CublasMMWrapper> mCublasWrapper;
+    tensorrt_llm::plugins::UniqPtrWNullCopy<tensorrt_llm::kernels::FusedMHARunnerV2> mFMHARunner;
+    tensorrt_llm::plugins::UniqPtrWNullCopy<tensorrt_llm::common::CublasMMWrapper> mCublasWrapper;
 };
 
-class BertAttentionPluginCreator : public BaseCreator
+class BertAttentionPluginCreator : public tensorrt_llm::plugins::BaseCreator
 {
 public:
     BertAttentionPluginCreator();

@@ -47,16 +47,18 @@ class BasePlugin : public nvinfer1::IPluginV2DynamicExt
 public:
     void setPluginNamespace(char const* libNamespace) noexcept override
     {
-        mNamespace = libNamespace;
+        // mNamespace = libNamespace;
+        mNamespace = "";
     }
 
     [[nodiscard]] char const* getPluginNamespace() const noexcept override
     {
         return mNamespace.c_str();
+        // return "".c_str();
     }
 
 protected:
-    std::string mNamespace{api::kDefaultNamespace};
+    std::string mNamespace{""};
 };
 
 class BaseCreator : public nvinfer1::IPluginCreator
@@ -64,16 +66,18 @@ class BaseCreator : public nvinfer1::IPluginCreator
 public:
     void setPluginNamespace(char const* libNamespace) noexcept override
     {
-        mNamespace = libNamespace;
+        // mNamespace = libNamespace;
+        mNamespace = "";
     }
 
     [[nodiscard]] char const* getPluginNamespace() const noexcept override
     {
         return mNamespace.c_str();
+        // return "".c_str();
     }
 
 protected:
-    std::string mNamespace{api::kDefaultNamespace};
+    std::string mNamespace{""};
 };
 
 // Write values into buffer

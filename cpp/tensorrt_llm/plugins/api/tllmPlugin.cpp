@@ -176,7 +176,7 @@ extern "C"
     [[maybe_unused]] nvinfer1::IPluginCreator* const* getPluginCreators(std::int32_t& nbCreators)
     {
         static tensorrt_llm::plugins::IdentityPluginCreator identityPluginCreator;
-        static tensorrt_llm::plugins::BertAttentionPluginCreator bertAttentionPluginCreator;
+        // static tensorrt_llm::plugins::BertAttentionPluginCreator bertAttentionPluginCreator;
         static tensorrt_llm::plugins::GPTAttentionPluginCreator gptAttentionPluginCreator;
         static tensorrt_llm::plugins::GemmPluginCreator gemmPluginCreator;
         static tensorrt_llm::plugins::GemmSwigluPluginCreator gemmSwigluPluginCreator;
@@ -211,7 +211,7 @@ extern "C"
 
         static std::array pluginCreators
             = { creatorPtr(identityPluginCreator),
-                  creatorPtr(bertAttentionPluginCreator),
+                // creatorPtr(bertAttentionPluginCreator),
                   creatorPtr(gptAttentionPluginCreator),
                   creatorPtr(gemmPluginCreator),
                   creatorPtr(gemmSwigluPluginCreator),

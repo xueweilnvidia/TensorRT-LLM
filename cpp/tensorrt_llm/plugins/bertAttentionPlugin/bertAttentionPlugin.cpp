@@ -24,9 +24,11 @@ using namespace nvinfer1;
 using namespace tensorrt_llm::kernels;
 namespace tc = tensorrt_llm::common;
 
-using tensorrt_llm::plugins::BertAttentionPluginCreator;
-using tensorrt_llm::plugins::BertAttentionPlugin;
+// using nvinfer1::BertAttentionPluginCreator;
+// using nvinfer1::BertAttentionPlugin;
 
+namespace nvinfer1
+{
 static char const* BERT_ATTENTION_PLUGIN_VERSION{"1"};
 static char const* BERT_ATTENTION_PLUGIN_NAME{"BertAttention"};
 PluginFieldCollection BertAttentionPluginCreator::mFC{};
@@ -68,16 +70,16 @@ BertAttentionPlugin::BertAttentionPlugin(int num_heads, int head_size, float q_s
 BertAttentionPlugin::BertAttentionPlugin(void const* data, size_t length)
 {
     char const *d = reinterpret_cast<char const*>(data), *a = d;
-    read(d, mNumHeads);
-    read(d, mHeadSize);
-    read(d, mQScaling);
-    read(d, mQKHalfAccum);
-    read(d, mEnableContextFMHA);
-    read(d, mFMHAForceFP32Acc);
-    read(d, mType);
-    read(d, mRelativeAttention);
-    read(d, mMaxDistance);
-    read(d, mRemovePadding);
+    tensorrt_llm::plugins::read(d, mNumHeads);
+    tensorrt_llm::plugins::read(d, mHeadSize);
+    tensorrt_llm::plugins::read(d, mQScaling);
+    tensorrt_llm::plugins::read(d, mQKHalfAccum);
+    tensorrt_llm::plugins::read(d, mEnableContextFMHA);
+    tensorrt_llm::plugins::read(d, mFMHAForceFP32Acc);
+    tensorrt_llm::plugins::read(d, mType);
+    tensorrt_llm::plugins::read(d, mRelativeAttention);
+    tensorrt_llm::plugins::read(d, mMaxDistance);
+    tensorrt_llm::plugins::read(d, mRemovePadding);
     TLLM_CHECK_WITH_INFO(d == a + length,
         "Expected length (%d) != real length (%d). This is often "
         "caused by using different TensorRT-LLM version to build "
@@ -545,16 +547,16 @@ size_t BertAttentionPlugin::getSerializationSize() const noexcept
 void BertAttentionPlugin::serialize(void* buffer) const noexcept
 {
     char *d = static_cast<char*>(buffer), *a = d;
-    write(d, mNumHeads);
-    write(d, mHeadSize);
-    write(d, mQScaling);
-    write(d, mQKHalfAccum);
-    write(d, mEnableContextFMHA);
-    write(d, mFMHAForceFP32Acc);
-    write(d, mType);
-    write(d, mRelativeAttention);
-    write(d, mMaxDistance);
-    write(d, mRemovePadding);
+    tensorrt_llm::plugins::write(d, mNumHeads);
+    tensorrt_llm::plugins::write(d, mHeadSize);
+    tensorrt_llm::plugins::write(d, mQScaling);
+    tensorrt_llm::plugins::write(d, mQKHalfAccum);
+    tensorrt_llm::plugins::write(d, mEnableContextFMHA);
+    tensorrt_llm::plugins::write(d, mFMHAForceFP32Acc);
+    tensorrt_llm::plugins::write(d, mType);
+    tensorrt_llm::plugins::write(d, mRelativeAttention);
+    tensorrt_llm::plugins::write(d, mMaxDistance);
+    tensorrt_llm::plugins::write(d, mRemovePadding);
     assert(d == a + getSerializationSize());
 }
 
@@ -624,8 +626,11 @@ IPluginV2* BertAttentionPluginCreator::createPlugin(char const* name, PluginFiel
         }
         else if (!strcmp(attrName, "context_fmha_type"))
         {
-            TLLM_CHECK(fields[i].type == PluginFieldType::kINT8);
+            TLLM_CHECK(fields[i].type == PluginFieldType::kINT32);
             context_fmha_type = static_cast<ContextFMHAType>(*(static_cast<int8_t const*>(fields[i].data)));
+            // if(context_fmha_type){
+                // std::cout<<" context fmha true"<< context_fmha_type  <<std::endl;
+            // }
         }
         else if (!strcmp(attrName, "type_id"))
         {
@@ -634,8 +639,11 @@ IPluginV2* BertAttentionPluginCreator::createPlugin(char const* name, PluginFiel
         }
         else if (!strcmp(attrName, "do_relative_attention"))
         {
-            TLLM_CHECK(fields[i].type == PluginFieldType::kINT8);
+            TLLM_CHECK(fields[i].type == PluginFieldType::kINT32);
             do_relative_attention = static_cast<bool>(*(static_cast<int8_t const*>(fields[i].data)));
+            if(!do_relative_attention){
+                std::cout<<"do_relative_attention false" <<std::endl;
+            }
         }
         else if (!strcmp(attrName, "max_distance"))
         {
@@ -644,8 +652,11 @@ IPluginV2* BertAttentionPluginCreator::createPlugin(char const* name, PluginFiel
         }
         else if (!strcmp(attrName, "remove_padding"))
         {
-            TLLM_CHECK(fields[i].type == PluginFieldType::kINT8);
+            TLLM_CHECK(fields[i].type == PluginFieldType::kINT32);
             remove_padding = static_cast<bool>(*(static_cast<int8_t const*>(fields[i].data)));
+            if(!remove_padding){
+                std::cout<<"remove_padding false" <<std::endl;
+            }
         }
     }
     try
@@ -657,7 +668,7 @@ IPluginV2* BertAttentionPluginCreator::createPlugin(char const* name, PluginFiel
     }
     catch (std::exception const& e)
     {
-        caughtError(e);
+        tensorrt_llm::plugins::caughtError(e);
     }
     return nullptr;
 }
@@ -675,7 +686,12 @@ IPluginV2* BertAttentionPluginCreator::deserializePlugin(
     }
     catch (std::exception const& e)
     {
-        caughtError(e);
+        tensorrt_llm::plugins::caughtError(e);
     }
     return nullptr;
 }
+
+
+REGISTER_TENSORRT_PLUGIN(BertAttentionPluginCreator);
+}
+
