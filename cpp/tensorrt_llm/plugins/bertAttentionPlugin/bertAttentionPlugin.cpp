@@ -14,6 +14,13 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+
+ //TODO：this plugin can't use in flux video model when batch size = 2 !!!!!!!
+ 
+
+
+ 
 #include "bertAttentionPlugin.h"
 #include "tensorrt_llm/kernels/decoderMaskedMultiheadAttention.h"
 #include "tensorrt_llm/kernels/gptKernels.h"
