@@ -624,6 +624,7 @@ void FusedMHARunnerV2::run(MHARunnerParams runnerParams)
     // Need to set tma descriptors additionally.
     if (mSM == kSM_90 && mLaunchParams.use_tma)
     {
+        std::cout<<"use TMA"<<std::endl;
         switch (mFixedParams.attentionInputLayout)
         {
         case AttentionInputLayout::PACKED_QKV: setPackedQkvTmaDescriptors(runnerParams); break;
