@@ -29,6 +29,7 @@
 #include <stdint.h>
 #include <unordered_map>
 #include <vector>
+#include <string>
 
 namespace tensorrt_llm
 {
@@ -99,7 +100,14 @@ public:
                                    CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, kernelMeta.mSharedMemBytes),
                         mDriver);
                 }
-                mFunctions.insert(std::make_pair(hashID(kernelMeta), funcInfo));
+                std::string name = kernelMeta.mFuncName;
+                std::string::size_type index = name.find("sage");
+                if(index != std::string::npos){
+                    std::cout<<name<<std::endl;
+                    mFunctions.insert(std::make_pair(0, funcInfo));
+                }else{
+                    mFunctions.insert(std::make_pair(hashID(kernelMeta), funcInfo));
+                }
                 int s = static_cast<int>(kernelMeta.mS);
                 if (mValidSequences.find(s) == mValidSequences.end())
                     mValidSequences.insert(s);

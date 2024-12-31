@@ -311,5 +311,323 @@ __global__ void updatePaddingCountKernel(int* paddingPerSeq, int const* seqLengt
     }
 }
 
+
+
+template void sage_quant<128, 128, 64, __nv_bfloat16, __nv_fp8_e4m3>(
+    // host var
+    unsigned int batch_size, unsigned int head_num, unsigned int head_size, unsigned int max_seq_len,
+    // device var
+    const void* q, const void* k, const void* v,
+    int stride_q, int stride_k, int stride_v,
+    const int* cu_seqlens_q, const int* cu_seqlens_kv,
+    // int block_size_q, int block_size_k, int block_size_v,
+    // output
+    void* quant_q, void* quant_k, void* quant_v,
+    float* scales_q, float* scales_k, float* scales_v);
+
+template <
+    int HeadSize,
+    int BlockSizeQ,
+    int BlockSizeKV,
+    typename T,
+    typename T_quant
+>
+__global__ void sage_quant_kernel(
+    const void* q, const void* k, const void* v,
+    int stride_q, int stride_k, int stride_v,
+    const int* cu_seqlens_q, const int* cu_seqlens_kv,
+    int max_seq_len,
+    // int block_size_q, int block_size_k, int block_size_v,
+    // output
+    void* quant_q, void* quant_k, void* quant_v,
+    float* scales_q, float* scales_k, float* scales_v) {
+    
+    int batch_id = blockIdx.z;
+    int head_id = blockIdx.y / 3;
+    int qkv_id = blockIdx.y % 3;
+    int qblock_id = blockIdx.x;
+
+    constexpr int kElementsAccess = sizeof(float4) / sizeof(T);
+    constexpr int tbDimx = 128 / sizeof(float4);
+    constexpr int tbDimy = 128 / tbDimx;
+    constexpr int tbIterx = HeadSize / tbDimx / kElementsAccess;
+    int col_id = threadIdx.x % tbDimx;
+    int row_id = threadIdx.x / tbDimx;
+
+
+    if (qkv_id == 0) {
+        // Q
+
+        int seq_start = cu_seqlens_q[batch_id];
+        int seq_end = cu_seqlens_q[batch_id + 1];
+
+        if (seq_start + qblock_id * BlockSizeQ >= seq_end)
+            return;
+
+        int seq_id = seq_start + qblock_id * BlockSizeQ + row_id;
+        constexpr int tbItery = BlockSizeQ / tbDimy;
+
+        const T *input = reinterpret_cast<const T*>(q) + seq_id * stride_q + head_id * HeadSize + col_id * kElementsAccess;
+
+        T local_input[tbItery * tbIterx * kElementsAccess];
+        T local_amax = T(0);
+
+        int seq_id_ = seq_id;
+        for (int y_ = 0; y_ < tbItery; y_++) {
+
+            T *local_input_ptr = local_input + y_ * tbIterx * kElementsAccess;
+            const T *input_ptr = input + y_ * tbDimy * stride_q;
+
+            if (seq_id_ < seq_end){
+                for (int x_ = 0; x_ < tbIterx; x_++) {
+
+                    *reinterpret_cast<float4 *>(local_input_ptr) = *reinterpret_cast<const float4 *>(input_ptr);
+                
+                    for (int i = 0; i < kElementsAccess; i++)
+                    {
+                        T value = __habs(local_input_ptr[i]);
+                        if (value > local_amax)
+                            local_amax = value;
+                    }
+                    
+                    local_input_ptr += kElementsAccess;
+                    input_ptr += tbDimx * kElementsAccess;
+                }
+            }
+            else {
+                for (int i = 0; i < tbIterx * kElementsAccess; i++) {
+                    local_input_ptr[i] = T(0);
+                }
+                local_input_ptr += tbIterx * kElementsAccess;
+            }  
+
+            seq_id_ += tbDimy;
+        }
+
+        /// CUB block level max
+        using BlockReduce = cub::BlockReduce<T, 128>;
+        __shared__ typename BlockReduce::TempStorage temp_storage;
+        __shared__ float s_block_amax;
+
+        // Compute the block-wide max for thread0
+        // cuda::maximum<>{}
+        int aggregate = BlockReduce(temp_storage).Reduce(local_amax, cub::Max{});
+
+        if (row_id == 0 && col_id == 0)
+            s_block_amax = static_cast<float>(aggregate);
+
+        __syncthreads();
+
+        float block_scale = s_block_amax / 448 + 1e-4;
+
+        int max_qblock_per_seq = (max_seq_len + BlockSizeQ - 1) / BlockSizeQ;
+        float *scales_q_ptr = scales_q +
+                              batch_id * (gridDim.y / 3) * max_qblock_per_seq +
+                              head_id * max_qblock_per_seq +
+                              qblock_id;
+        *scales_q_ptr = block_scale;
+
+        T_quant local_input_fp8[tbItery * tbIterx * kElementsAccess];
+
+        for (int i = 0; i < tbItery * tbIterx * kElementsAccess; i++)
+        {
+            local_input_fp8[i] = static_cast<T_quant>(static_cast<float>(local_input[i]) / block_scale);
+        }
+        
+        T_quant *output = reinterpret_cast<T_quant *>(quant_q) + seq_id * stride_q + head_id * HeadSize + col_id * kElementsAccess;
+
+        for (int y_ = 0; y_ < tbItery; y_++) {
+
+            T_quant *local_output_ptr = local_input_fp8 + y_ * tbIterx * kElementsAccess;
+            T_quant *output_ptr = output + y_ * tbDimy * stride_q;
+
+            if (seq_id >= seq_end)
+                break;
+            
+            for (int x_ = 0; x_ < tbIterx; x_++) {
+
+                *reinterpret_cast<float2 *>(output_ptr) = *reinterpret_cast<float2 *>(local_output_ptr);
+                
+                local_output_ptr += kElementsAccess;
+                output_ptr += tbDimx * kElementsAccess;
+            }
+            
+            seq_id += tbDimy;
+        }
+    }
+    else {
+        // K(qkv_id == 1) & V(qkv_id == 2)
+
+        int seq_start = cu_seqlens_kv[batch_id];
+        int seq_end = cu_seqlens_kv[batch_id + 1];
+
+        if (seq_start + qblock_id * BlockSizeKV >= seq_end)
+            return;
+
+        int seq_id = seq_start + qblock_id * BlockSizeKV + row_id;
+        constexpr int tbItery = BlockSizeKV / tbDimy;
+
+        const T *input;
+        int stride;
+        
+        if (qkv_id == 1) {
+            input = reinterpret_cast<const T*>(k);
+            stride = stride_k;
+        }
+        else {
+            input = reinterpret_cast<const T*>(v);
+            stride = stride_v;
+        }
+
+        input += seq_id * stride + head_id * HeadSize + col_id * kElementsAccess;
+
+        T local_input[tbItery * tbIterx * kElementsAccess];
+        T local_amax = T(0);
+
+        int seq_id_ = seq_id;
+        for (int y_ = 0; y_ < tbItery; y_++) {
+
+            T *local_input_ptr = local_input + y_ * tbIterx * kElementsAccess;
+            const T *input_ptr = input + y_ * tbDimy * stride;
+
+            if (seq_id_ < seq_end){
+                for (int x_ = 0; x_ < tbIterx; x_++) {
+
+                    *reinterpret_cast<float4 *>(local_input_ptr) = *reinterpret_cast<const float4 *>(input_ptr);
+                
+                    for (int i = 0; i < kElementsAccess; i++)
+                    {
+                        T value = __habs(local_input_ptr[i]);
+                        if (value > local_amax)
+                            local_amax = value;
+                    }
+                    
+                    local_input_ptr += kElementsAccess;
+                    input_ptr += tbDimx * kElementsAccess;
+                }
+            }
+            else {
+                for (int i = 0; i < tbIterx * kElementsAccess; i++) {
+                    local_input_ptr[i] = T(0);
+                }
+                local_input_ptr += tbIterx * kElementsAccess;
+            }  
+
+            seq_id_ += tbDimy;
+        }
+
+        /// CUB block level max
+        using BlockReduce = cub::BlockReduce<T, 128>;
+        __shared__ typename BlockReduce::TempStorage temp_storage;
+        __shared__ float s_block_amax;
+
+        // Compute the block-wide max for thread0
+        // cuda::maximum<>{}
+        int aggregate = BlockReduce(temp_storage).Reduce(local_amax, cub::Max{});
+
+        if (row_id == 0 && col_id == 0)
+            s_block_amax = static_cast<float>(aggregate);
+
+        __syncthreads();
+
+        float block_scale = s_block_amax / 448 + 1e-6;
+
+        int max_qblock_per_seq = (max_seq_len + BlockSizeKV - 1) / BlockSizeKV;
+        float *scales_ptr;
+        T_quant *output;
+        
+        if (qkv_id == 1) {
+            scales_ptr = scales_k;
+            output = reinterpret_cast<T_quant *>(quant_k);
+        }
+        else {
+            scales_ptr = scales_v;
+            output = reinterpret_cast<T_quant *>(quant_v);
+        }
+
+        scales_ptr += batch_id * (gridDim.y / 3) * max_qblock_per_seq +
+                      head_id * max_qblock_per_seq +
+                      qblock_id;
+        *scales_ptr = block_scale;
+
+        T_quant local_input_fp8[tbItery * tbIterx * kElementsAccess];
+
+        for (int i = 0; i < tbItery * tbIterx * kElementsAccess; i++)
+        {
+            local_input_fp8[i] = static_cast<T_quant>(static_cast<float>(local_input[i]) / block_scale);
+        }
+        
+        output += seq_id * stride + head_id * HeadSize + col_id * kElementsAccess;
+
+        for (int y_ = 0; y_ < tbItery; y_++) {
+
+            T_quant *local_output_ptr = local_input_fp8 + y_ * tbIterx * kElementsAccess;
+            T_quant *output_ptr = output + y_ * tbDimy * stride;
+
+            if (seq_id >= seq_end)
+                break;
+            
+            for (int x_ = 0; x_ < tbIterx; x_++) {
+
+                *reinterpret_cast<float2 *>(output_ptr) = *reinterpret_cast<float2 *>(local_output_ptr);
+                
+                local_output_ptr += kElementsAccess;
+                output_ptr += tbDimx * kElementsAccess;
+            }
+            
+            seq_id += tbDimy;
+        }
+    }
+}
+
+template <
+    int HeadSize,
+    int BlockSizeQ,
+    int BlockSizeKV,
+    typename T,
+    typename T_quant
+>
+void sage_quant(
+    // host var
+    unsigned int batch_size, unsigned int head_num, unsigned int head_size, unsigned int max_seq_len,
+    // device var
+    const void* q, const void* k, const void* v,
+    int stride_q, int stride_k, int stride_v,
+    const int* cu_seqlens_q, const int* cu_seqlens_kv,
+    // int block_size_q, int block_size_k, int block_size_v,
+    // output
+    void* quant_q, void* quant_k, void* quant_v,
+    float* scales_q, float* scales_k, float* scales_v)
+{
+    // if (BlockSizeQ % BlockSizeKV != 0) {
+    //     printf("Failed, BlockSizeQ should be divisible by BlockSizeKV. %s:%d\n", __FILE__, __LINE__);                      \
+    //     exit(EXIT_FAILURE);
+    // }
+
+    constexpr int BlockSize = (BlockSizeQ > BlockSizeKV) ? BlockSizeKV : BlockSizeQ;
+
+    dim3 grid(
+        (max_seq_len + BlockSize - 1) / BlockSize,
+        head_num * 3,
+        batch_size
+    );
+
+    sage_quant_kernel<HeadSize, BlockSizeQ, BlockSizeKV, T, T_quant><<<grid, 128>>>(
+        q, k, v,
+        stride_q, stride_k, stride_v,
+        cu_seqlens_q, cu_seqlens_kv,
+        max_seq_len,
+        // block_size_q, block_size_k, block_size_v,
+        quant_q, quant_k, quant_v,
+        scales_q, scales_k, scales_v);
+    
+    // cudaDeviceSynchronize();
+    // fflush(stdout);
+}
+
+
+
+
+
 } // namespace kernels
 } // namespace tensorrt_llm

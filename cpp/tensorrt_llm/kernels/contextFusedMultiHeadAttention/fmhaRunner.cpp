@@ -363,6 +363,7 @@ void FusedMHARunnerV2::setupLaunchParams(MHARunnerParams runnerParams)
 // TMA descriptors are used as grid_constant parameters (remove MemCpyH2D operations)
 void FusedMHARunnerV2::setPackedQkvTmaDescriptors(MHARunnerParams runnerParams)
 {
+    std::cout<<"set packed QKV Tma"<<std::endl;
     // split D into multiple groups in order to match the TMA swizzle mode (128B)
     uint32_t const d_in_bytes = get_size_in_bytes(mLaunchParams.padded_d, mFixedParams.dataType);
     uint32_t const d_groups = d_in_bytes > 128 ? d_in_bytes / 128 : 1;

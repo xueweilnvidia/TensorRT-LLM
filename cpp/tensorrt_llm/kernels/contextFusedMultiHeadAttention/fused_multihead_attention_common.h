@@ -91,6 +91,8 @@ struct MHARunnerFixedParams
 {
     // The FMHA data type.
     Data_type dataType;
+    Data_type inputDataType;
+    Data_type outputDataType;
     // Do we use fp32 accumulation ?
     // TODO(yibinl): remove forceFp32Acc from MHARunnerFixedParams after adding host_runtime_perf_knobs to
     // bertAttentionPlugin input tensors, so that we can change mLaunchParams.force_fp32_acc value in runtime.

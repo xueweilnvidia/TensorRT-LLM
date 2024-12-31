@@ -164,8 +164,15 @@ size_t BertAttentionPlugin::getWorkspaceSize(nvinfer1::PluginTensorDesc const* i
         = mEnableContextFMHA ? 0 : sizeof(float) * batch_size * mNumHeads * input_seq_len * input_seq_len;
     const size_t padding_offset_size = mEnableContextFMHA ? 0 : sizeof(int) * batch_size * input_seq_len;
     const size_t fmha_scheduler_counter = mEnableContextFMHA ? sizeof(uint32_t) : 0;
+    
+    std::cout<<"input_seq_len: "<< input_seq_len <<std::endl;
+    std::cout<<"hidden_dim: "<< mNumHeads * mHeadSize <<std::endl;
+    const size_t quanted_qkv_size = batch_size * input_seq_len * mNumHeads * mHeadSize * 3;
+    const size_t q_scale_size = sizeof(float) * batch_size * ((input_seq_len + mQBlockSize - 1) / mQBlockSize) * mNumHeads;
+    const size_t v_scale_size = sizeof(float) * batch_size * ((input_seq_len + mVBlockSize - 1) / mVBlockSize) * mNumHeads;
+    const size_t k_scale_size = sizeof(float) * batch_size * ((input_seq_len + mKBlockSize - 1) / mKBlockSize) * mNumHeads;
 
-    int const NUM_BUFFERS = 11;
+    int const NUM_BUFFERS = 15;
     size_t workspaces[NUM_BUFFERS];
     workspaces[0] = CUBLAS_WORKSPACE_SIZE;
     workspaces[1] = attention_mask_size;
@@ -178,6 +185,12 @@ size_t BertAttentionPlugin::getWorkspaceSize(nvinfer1::PluginTensorDesc const* i
     workspaces[8] = qk_buf_float_size;
     workspaces[9] = padding_offset_size;
     workspaces[10] = fmha_scheduler_counter;
+
+    workspaces[11] = quanted_qkv_size;
+    workspaces[12] = q_scale_size;
+    workspaces[13] = v_scale_size;
+    workspaces[14] = k_scale_size;
+
 
     return tc::calculateTotalWorkspaceSize(workspaces, NUM_BUFFERS);
 }
@@ -244,6 +257,11 @@ int BertAttentionPlugin::enqueueImpl(nvinfer1::PluginTensorDesc const* inputDesc
     const size_t padding_offset_size = mEnableContextFMHA ? 0 : sizeof(int) * batch_size * input_seq_len;
     const size_t fmha_scheduler_counter = mEnableContextFMHA ? sizeof(uint32_t) : 0;
 
+    const size_t quanted_qkv_size = batch_size * input_seq_len * mNumHeads * mHeadSize * 3;
+    const size_t q_scale_size = sizeof(float) * batch_size * ((input_seq_len + mQBlockSize - 1) / mQBlockSize) * mNumHeads;
+    const size_t v_scale_size = sizeof(float) * batch_size * ((input_seq_len + mVBlockSize - 1) / mVBlockSize) * mNumHeads;
+    const size_t k_scale_size = sizeof(float) * batch_size * ((input_seq_len + mKBlockSize - 1) / mKBlockSize) * mNumHeads;
+
     // Workspace pointer shift
     int8_t* workspace_byte_ptr = reinterpret_cast<int8_t*>(workspace);
     size_t offset = CUBLAS_WORKSPACE_SIZE;
@@ -260,6 +278,13 @@ int BertAttentionPlugin::enqueueImpl(nvinfer1::PluginTensorDesc const* inputDesc
     int* padding_offset = reinterpret_cast<int*>(tc::nextWorkspacePtr(workspace_byte_ptr, offset, padding_offset_size));
     uint32_t* fmha_tile_counter_ptr
         = reinterpret_cast<uint32_t*>(tc::nextWorkspacePtr(workspace_byte_ptr, offset, fmha_scheduler_counter));
+
+    __nv_fp8_e4m3* quanted_qkv_ptr = reinterpret_cast<__nv_fp8_e4m3*>(tc::nextWorkspacePtr(workspace_byte_ptr, offset, quanted_qkv_size));
+    
+
+    float* q_scale_ptr = reinterpret_cast<float*>(tc::nextWorkspacePtr(workspace_byte_ptr, offset, q_scale_size));
+    float* k_scale_ptr = reinterpret_cast<float*>(tc::nextWorkspacePtr(workspace_byte_ptr, offset, k_scale_size));
+    float* v_scale_ptr = reinterpret_cast<float*>(tc::nextWorkspacePtr(workspace_byte_ptr, offset, v_scale_size));
 
     // build attention_mask, cu_seqlens, and padding_offset tensors
     BuildDecoderInfoParams<T> params;
@@ -294,6 +319,26 @@ int BertAttentionPlugin::enqueueImpl(nvinfer1::PluginTensorDesc const* inputDesc
     // We update mEnableContextFMHA in constructor to check this condition
     if (mEnableContextFMHA)
     {
+        // right now, this kernel only support 128 headsize
+        sage_quant<128, 128, 64, __nv_bfloat16, __nv_fp8_e4m3>(
+        // host var
+        batch_size, mNumHeads, mHeadSize, input_seq_len,
+        // device var
+        // q k v
+        attention_input, attention_input + mNumHeads * mHeadSize, attention_input + 2 * mNumHeads * mHeadSize,
+        // stride
+        3 * mNumHeads * mHeadSize, 3 * mNumHeads * mHeadSize, 3 * mNumHeads * mHeadSize,
+        cu_seqlens, cu_seqlens,
+        // block size
+        // block_size_q, block_size_k, block_size_v,
+        // quant q k v
+        quanted_qkv_ptr, quanted_qkv_ptr + mNumHeads * mHeadSize, quanted_qkv_ptr + 2 * mNumHeads * mHeadSize,
+        // quanted_qkv_ptr, quanted_qkv_ptr + mNumHeads * mHeadSize, contex,
+        // scales
+        q_scale_ptr, k_scale_ptr, v_scale_ptr);
+        
+        sync_check_cuda_error();
+
         // Construct the fmha params for running kernels.
         MHARunnerParams fmhaParams{};
         fmhaParams.b = request_batch_size;
@@ -310,119 +355,122 @@ int BertAttentionPlugin::enqueueImpl(nvinfer1::PluginTensorDesc const* inputDesc
 
         // Run the fmha kernel.
         mFMHARunner->run(fmhaParams);
+
+        // cudaMemcpy(context_buf_, quanted_qkv_ptr, batch_size * input_seq_len * mNumHeads * mHeadSize, cudaMemcpyDeviceToDevice);
+        // sync_check_cuda_error();
     }
-    else
-    {
-        // FIXME: a temporary solution to make sure the padding part of key/value buffer is 0
-        // NOTE: pointer subtraction is used below since there could be some extra gap due to alignment.
-        //  Otherwise, we could do cudaMemsetAsync(k_buf_2_, 0, k_buf_2_size + v_buf_2_size, stream);
-        // cudaMemsetAsync(k_buf_2_, 0, reinterpret_cast<int8_t*>(qk_buf_) - reinterpret_cast<int8_t*>(k_buf_2_),
-        // stream);
-        // FIXME: the final solution is to change the add_fusedQKV_bias_transpose_kernel to map CTAs corresponding to
-        // the output shape, and set the padding part to 0. Without zero-initialize guarantee, these workspace buffers
-        // may contain random NaN values when IFB workload is high.
-        cudaMemsetAsync(k_buf_2_, 0,
-            reinterpret_cast<int8_t*>(v_buf_2_) - reinterpret_cast<int8_t*>(k_buf_2_) + v_buf_2_size, stream);
+    // else
+    // {
+    //     // FIXME: a temporary solution to make sure the padding part of key/value buffer is 0
+    //     // NOTE: pointer subtraction is used below since there could be some extra gap due to alignment.
+    //     //  Otherwise, we could do cudaMemsetAsync(k_buf_2_, 0, k_buf_2_size + v_buf_2_size, stream);
+    //     // cudaMemsetAsync(k_buf_2_, 0, reinterpret_cast<int8_t*>(qk_buf_) - reinterpret_cast<int8_t*>(k_buf_2_),
+    //     // stream);
+    //     // FIXME: the final solution is to change the add_fusedQKV_bias_transpose_kernel to map CTAs corresponding to
+    //     // the output shape, and set the padding part to 0. Without zero-initialize guarantee, these workspace buffers
+    //     // may contain random NaN values when IFB workload is high.
+    //     cudaMemsetAsync(k_buf_2_, 0,
+    //         reinterpret_cast<int8_t*>(v_buf_2_) - reinterpret_cast<int8_t*>(k_buf_2_) + v_buf_2_size, stream);
 
-        // only non-FMHA path needs to split Q,K,V from QKV
-        invokeAddFusedQKVBiasTranspose(q_buf_2_, k_buf_2_, v_buf_2_, const_cast<T*>(attention_input), input_lengths,
-            mRemovePadding ? padding_offset : nullptr, batch_size, input_seq_len, num_tokens, mNumHeads, mNumHeads,
-            mHeadSize, 0, 0.0f, RotaryScalingType::kNONE, 0.0f, 0, PositionEmbeddingType::kLEARNED_ABSOLUTE,
-            (float*) nullptr, 0, stream);
+    //     // only non-FMHA path needs to split Q,K,V from QKV
+    //     invokeAddFusedQKVBiasTranspose(q_buf_2_, k_buf_2_, v_buf_2_, const_cast<T*>(attention_input), input_lengths,
+    //         mRemovePadding ? padding_offset : nullptr, batch_size, input_seq_len, num_tokens, mNumHeads, mNumHeads,
+    //         mHeadSize, 0, 0.0f, RotaryScalingType::kNONE, 0.0f, 0, PositionEmbeddingType::kLEARNED_ABSOLUTE,
+    //         (float*) nullptr, 0, stream);
 
-        if (!mQKHalfAccum && gemm_data_type != CUDA_R_32F)
-        {
-            mCublasWrapper->stridedBatchedGemm(CUBLAS_OP_T, CUBLAS_OP_N,
-                attention_seq_len_2,             // n
-                attention_seq_len_1,             // m
-                mHeadSize,                       // k
-                qk_scale_gemm, k_buf_2_, gemm_data_type,
-                mHeadSize,                       // k
-                attention_seq_len_2 * mHeadSize, // n * k
-                q_buf_2_, gemm_data_type,
-                mHeadSize,                       // k
-                attention_seq_len_1 * mHeadSize, // m * k
-                0.0f, qk_buf_float_, CUDA_R_32F,
-                attention_seq_len_2,             // n
-                attention_seq_len_2 * attention_seq_len_1,
-                request_batch_size * mNumHeads,  // global batch size
-                CUDA_R_32F);
+    //     if (!mQKHalfAccum && gemm_data_type != CUDA_R_32F)
+    //     {
+    //         mCublasWrapper->stridedBatchedGemm(CUBLAS_OP_T, CUBLAS_OP_N,
+    //             attention_seq_len_2,             // n
+    //             attention_seq_len_1,             // m
+    //             mHeadSize,                       // k
+    //             qk_scale_gemm, k_buf_2_, gemm_data_type,
+    //             mHeadSize,                       // k
+    //             attention_seq_len_2 * mHeadSize, // n * k
+    //             q_buf_2_, gemm_data_type,
+    //             mHeadSize,                       // k
+    //             attention_seq_len_1 * mHeadSize, // m * k
+    //             0.0f, qk_buf_float_, CUDA_R_32F,
+    //             attention_seq_len_2,             // n
+    //             attention_seq_len_2 * attention_seq_len_1,
+    //             request_batch_size * mNumHeads,  // global batch size
+    //             CUDA_R_32F);
 
-            // add relative position bias
-            if (mRelativeAttention)
-            {
-                // add rel pos bias
-                // QK is (batch_size, local_head_num, q_length, k_length), rel pos bias is (1, local_head_num,
-                // max_output_len + 1, max_output_len + 1). broadcast along 1st dim. max_seq_len is already
-                // max_output_len + 1. In implicit mode, relative_attention_bias is rel attn table
-                // [num_heads, num_buckets], with necessary params (max_distance, num_buckets) passed at the end
-                invokeAddRelativeAttentionBiasUnaligned(qk_buf_float_, relative_attn_table, request_batch_size,
-                    mNumHeads, attention_seq_len_1, attention_seq_len_2, stream, mMaxDistance > 0,
-                    inputDesc[3].dims.d[1], mMaxDistance, true /* bidirectional */);
-            }
+    //         // add relative position bias
+    //         if (mRelativeAttention)
+    //         {
+    //             // add rel pos bias
+    //             // QK is (batch_size, local_head_num, q_length, k_length), rel pos bias is (1, local_head_num,
+    //             // max_output_len + 1, max_output_len + 1). broadcast along 1st dim. max_seq_len is already
+    //             // max_output_len + 1. In implicit mode, relative_attention_bias is rel attn table
+    //             // [num_heads, num_buckets], with necessary params (max_distance, num_buckets) passed at the end
+    //             invokeAddRelativeAttentionBiasUnaligned(qk_buf_float_, relative_attn_table, request_batch_size,
+    //                 mNumHeads, attention_seq_len_1, attention_seq_len_2, stream, mMaxDistance > 0,
+    //                 inputDesc[3].dims.d[1], mMaxDistance, true /* bidirectional */);
+    //         }
 
-            MaskedSoftmaxParam<T, float> param;
-            param.attention_score = qk_buf_;       // (batch_size, head_num, q_length, k_length)
-            param.qk = qk_buf_float_;              // (batch_size, head_num, q_length, k_length)
-            param.attention_mask = attention_mask; // (batch_size, q_length, k_length)
-            param.batch_size = request_batch_size;
-            param.q_length = attention_seq_len_1;
-            param.k_length = attention_seq_len_2;
-            param.num_heads = mNumHeads;
-            param.qk_scale = qk_scale_softmax;
-            param.linear_bias_slopes = const_cast<T*>(linear_bias_slopes); // (head_num,), optional
-            invokeMaskedSoftmax(param, stream);
-        }
-        else
-        {
-            mCublasWrapper->stridedBatchedGemm(CUBLAS_OP_T, CUBLAS_OP_N, attention_seq_len_2, attention_seq_len_1,
-                mHeadSize, k_buf_2_, mHeadSize, attention_seq_len_2 * mHeadSize, q_buf_2_, mHeadSize,
-                attention_seq_len_1 * mHeadSize, qk_buf_, attention_seq_len_2,
-                attention_seq_len_2 * attention_seq_len_1, request_batch_size * mNumHeads, qk_scale_gemm,
-                0.0f); // alpha, beta
+    //         MaskedSoftmaxParam<T, float> param;
+    //         param.attention_score = qk_buf_;       // (batch_size, head_num, q_length, k_length)
+    //         param.qk = qk_buf_float_;              // (batch_size, head_num, q_length, k_length)
+    //         param.attention_mask = attention_mask; // (batch_size, q_length, k_length)
+    //         param.batch_size = request_batch_size;
+    //         param.q_length = attention_seq_len_1;
+    //         param.k_length = attention_seq_len_2;
+    //         param.num_heads = mNumHeads;
+    //         param.qk_scale = qk_scale_softmax;
+    //         param.linear_bias_slopes = const_cast<T*>(linear_bias_slopes); // (head_num,), optional
+    //         invokeMaskedSoftmax(param, stream);
+    //     }
+    //     else
+    //     {
+    //         mCublasWrapper->stridedBatchedGemm(CUBLAS_OP_T, CUBLAS_OP_N, attention_seq_len_2, attention_seq_len_1,
+    //             mHeadSize, k_buf_2_, mHeadSize, attention_seq_len_2 * mHeadSize, q_buf_2_, mHeadSize,
+    //             attention_seq_len_1 * mHeadSize, qk_buf_, attention_seq_len_2,
+    //             attention_seq_len_2 * attention_seq_len_1, request_batch_size * mNumHeads, qk_scale_gemm,
+    //             0.0f); // alpha, beta
 
-            // add relative position bias
-            if (mRelativeAttention)
-            {
-                // add rel pos bias
-                // QK is (batch_size, local_head_num, q_length, k_length), rel pos bias is (1, local_head_num,
-                // max_output_len + 1, max_output_len + 1). broadcast along 1st dim. max_seq_len is already
-                // max_output_len + 1. In implicit mode, relative_attention_bias is rel attn table
-                // [num_heads, num_buckets], with necessary params (max_distance, num_buckets) passed at the end
-                invokeAddRelativeAttentionBiasUnaligned(qk_buf_, relative_attn_table, request_batch_size, mNumHeads,
-                    attention_seq_len_1, attention_seq_len_2, stream, mMaxDistance > 0, inputDesc[3].dims.d[1],
-                    mMaxDistance, true /* bidirectional */);
-            }
+    //         // add relative position bias
+    //         if (mRelativeAttention)
+    //         {
+    //             // add rel pos bias
+    //             // QK is (batch_size, local_head_num, q_length, k_length), rel pos bias is (1, local_head_num,
+    //             // max_output_len + 1, max_output_len + 1). broadcast along 1st dim. max_seq_len is already
+    //             // max_output_len + 1. In implicit mode, relative_attention_bias is rel attn table
+    //             // [num_heads, num_buckets], with necessary params (max_distance, num_buckets) passed at the end
+    //             invokeAddRelativeAttentionBiasUnaligned(qk_buf_, relative_attn_table, request_batch_size, mNumHeads,
+    //                 attention_seq_len_1, attention_seq_len_2, stream, mMaxDistance > 0, inputDesc[3].dims.d[1],
+    //                 mMaxDistance, true /* bidirectional */);
+    //         }
 
-            MaskedSoftmaxParam<T, T> param;
-            param.attention_score = qk_buf_;       // (batch_size, head_num, q_length, k_length)
-            param.qk = qk_buf_;                    // (batch_size, head_num, q_length, k_length)
-            param.attention_mask = attention_mask; // (batch_size, q_length, k_length)
-            param.batch_size = request_batch_size;
-            param.q_length = attention_seq_len_1;
-            param.k_length = attention_seq_len_2;
-            param.num_heads = mNumHeads;
-            param.qk_scale = qk_scale_softmax;
-            param.linear_bias_slopes = const_cast<T*>(linear_bias_slopes); // (head_num,), optional
-            invokeMaskedSoftmax(param, stream);
-        }
+    //         MaskedSoftmaxParam<T, T> param;
+    //         param.attention_score = qk_buf_;       // (batch_size, head_num, q_length, k_length)
+    //         param.qk = qk_buf_;                    // (batch_size, head_num, q_length, k_length)
+    //         param.attention_mask = attention_mask; // (batch_size, q_length, k_length)
+    //         param.batch_size = request_batch_size;
+    //         param.q_length = attention_seq_len_1;
+    //         param.k_length = attention_seq_len_2;
+    //         param.num_heads = mNumHeads;
+    //         param.qk_scale = qk_scale_softmax;
+    //         param.linear_bias_slopes = const_cast<T*>(linear_bias_slopes); // (head_num,), optional
+    //         invokeMaskedSoftmax(param, stream);
+    //     }
 
-        mCublasWrapper->stridedBatchedGemm(CUBLAS_OP_N, CUBLAS_OP_N, mHeadSize, attention_seq_len_1,
-            attention_seq_len_2, v_buf_2_, mHeadSize, attention_seq_len_2 * mHeadSize, qk_buf_, attention_seq_len_2,
-            attention_seq_len_1 * attention_seq_len_2, qkv_buf_2_, mHeadSize, attention_seq_len_1 * mHeadSize,
-            request_batch_size * mNumHeads);
+    //     mCublasWrapper->stridedBatchedGemm(CUBLAS_OP_N, CUBLAS_OP_N, mHeadSize, attention_seq_len_1,
+    //         attention_seq_len_2, v_buf_2_, mHeadSize, attention_seq_len_2 * mHeadSize, qk_buf_, attention_seq_len_2,
+    //         attention_seq_len_1 * attention_seq_len_2, qkv_buf_2_, mHeadSize, attention_seq_len_1 * mHeadSize,
+    //         request_batch_size * mNumHeads);
 
-        if (!mRemovePadding)
-        {
-            invokeTransposeQKV(context_buf_, qkv_buf_2_, request_batch_size, attention_seq_len_1, mNumHeads, mHeadSize,
-                (float*) nullptr, 0, stream);
-        }
-        else
-        {
-            invokeTransposeAttentionOutRemovePadding(qkv_buf_2_, context_buf_, num_tokens, request_batch_size,
-                request_seq_len, mNumHeads, mHeadSize, padding_offset, (float*) nullptr, 0, stream);
-        }
-    }
+    //     if (!mRemovePadding)
+    //     {
+    //         invokeTransposeQKV(context_buf_, qkv_buf_2_, request_batch_size, attention_seq_len_1, mNumHeads, mHeadSize,
+    //             (float*) nullptr, 0, stream);
+    //     }
+    //     else
+    //     {
+    //         invokeTransposeAttentionOutRemovePadding(qkv_buf_2_, context_buf_, num_tokens, request_batch_size,
+    //             request_seq_len, mNumHeads, mHeadSize, padding_offset, (float*) nullptr, 0, stream);
+    //     }
+    // }
     sync_check_cuda_error();
     return 0;
 }
@@ -512,6 +560,9 @@ int BertAttentionPlugin::initialize() noexcept
         // Construct the fmha runner.
         MHARunnerFixedParams fmhaParams{};
         fmhaParams.dataType = data_type;
+        // add input and output dataType
+        fmhaParams.inputDataType = DATA_TYPE_E4M3;
+        fmhaParams.outputDataType = DATA_TYPE_BF16;
         fmhaParams.forceFp32Acc = mFMHAForceFP32Acc;
         fmhaParams.attentionMaskType = ContextAttentionMaskType::PADDING;
         fmhaParams.isSPadded = !mRemovePadding;

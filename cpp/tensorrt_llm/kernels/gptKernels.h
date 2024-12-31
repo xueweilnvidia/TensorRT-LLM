@@ -220,5 +220,24 @@ struct BuildDecoderInfoParams
 template <typename T>
 void invokeBuildDecoderInfo(BuildDecoderInfoParams<T> const& params, cudaStream_t stream);
 
+template <
+    int HeadSize,
+    int BlockSizeQ,
+    int BlockSizeKV,
+    typename T,
+    typename T_quant
+>
+void sage_quant(
+    // host var
+    unsigned int batch_size, unsigned int head_num, unsigned int head_size, unsigned int max_seq_len,
+    // device var
+    const void* q, const void* k, const void* v,
+    int stride_q, int stride_k, int stride_v,
+    const int* cu_seqlens_q, const int* cu_seqlens_kv,
+    // int block_size_q, int block_size_k, int block_size_v,
+    // output
+    void* quant_q, void* quant_k, void* quant_v,
+    float* scales_q, float* scales_k, float* scales_v);
+
 } // namespace kernels
 } // namespace tensorrt_llm
