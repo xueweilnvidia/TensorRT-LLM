@@ -91,6 +91,8 @@ struct MHARunnerFixedParams
 {
     // The FMHA data type.
     Data_type dataType;
+    Data_type inputDataType;
+    Data_type outputDataType;
     // Do we use fp32 accumulation ?
     // TODO(yibinl): remove forceFp32Acc from MHARunnerFixedParams after adding host_runtime_perf_knobs to
     // bertAttentionPlugin input tensors, so that we can change mLaunchParams.force_fp32_acc value in runtime.
@@ -209,6 +211,14 @@ struct MHARunnerParams
     // The cuda stream.
     cudaStream_t stream;
     bool forceFp32Acc = false;
+
+    float* qScalePtr;
+    float* kScalePtr;
+    float* vScalePtr;
+
+    int qMaxNBlock;
+    int kMaxNBlock;
+    int vMaxNBlock;
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -325,6 +335,18 @@ struct Fused_multihead_attention_params_v2
 
     // is input/output padded
     bool is_s_padded = false;
+
+    struct SageAttention {
+        struct Scales {
+            // ceil(max_seqlen / block_size)
+            int max_nblock;
+            // The scale of each block, layout: (B, H, max_nblock)
+            float* scales;
+        }
+        q, k, v;
+    }
+    sage;
+
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////

@@ -120,25 +120,25 @@ void FusedMHARunnerV2::setupKernelParams(MHARunnerParams runnerParams)
 
     // Packed QKV input layout.
     mKernelParams.qkv_stride_in_bytes = get_size_in_bytes(
-        (mFixedParams.numQHeads + 2 * mFixedParams.numKvHeads) * mFixedParams.headSize, mFixedParams.dataType);
+        (mFixedParams.numQHeads + 2 * mFixedParams.numKvHeads) * mFixedParams.headSize, mFixedParams.inputDataType);
     // Contiguous Q input layout.
     mKernelParams.q_stride_in_bytes
-        = get_size_in_bytes(mFixedParams.numQHeads * mFixedParams.headSize, mFixedParams.dataType);
+        = get_size_in_bytes(mFixedParams.numQHeads * mFixedParams.headSize, mFixedParams.inputDataType);
     // Set the kv_stride_in_bytes when separate kv buffer is used.
     if (mFixedParams.attentionInputLayout == AttentionInputLayout::Q_PAGED_KV)
     {
         // Paged kv cache layout.
         mKernelParams.kv_stride_in_bytes = get_size_in_bytes(
-            runnerParams.pagedKvCache.mTokensPerBlock * mFixedParams.headSize, mFixedParams.dataType);
+            runnerParams.pagedKvCache.mTokensPerBlock * mFixedParams.headSize, mFixedParams.inputDataType);
     }
     else if (mFixedParams.attentionInputLayout == AttentionInputLayout::Q_CONTIGUOUS_KV)
     {
         // Contiguous kv input layout.
-        mKernelParams.kv_stride_in_bytes = get_size_in_bytes(mFixedParams.headSize, mFixedParams.dataType);
+        mKernelParams.kv_stride_in_bytes = get_size_in_bytes(mFixedParams.headSize, mFixedParams.inputDataType);
     }
     // Set the output buffer stride in bytes.
     mKernelParams.o_stride_in_bytes
-        = get_size_in_bytes(mFixedParams.numQHeads * mFixedParams.headSize, mFixedParams.dataType);
+        = get_size_in_bytes(mFixedParams.numQHeads * mFixedParams.headSize, mFixedParams.outputDataType);
     // Set the packed_mask_stride_in_bytes.
     if (mFixedParams.attentionMaskType == ContextAttentionMaskType::CUSTOM_MASK)
     {
@@ -154,6 +154,7 @@ void FusedMHARunnerV2::setupKernelParams(MHARunnerParams runnerParams)
     // (bmm1_output * scale_bmm1 + alibi) * scale_after_alibi
     float const scale_after_alibi = mFixedParams.scaleAlibi ? inv_sqrt_scale : 1.0f;
     float scale_bmm1 = mFixedParams.scaleAlibi ? 1.0f : inv_sqrt_scale;
+    // std::cout<<"scale bmm1: " <<scale_bmm1 <<std::endl;
     // Fuse 1.0f / qk_tanh_scale into scale_bmm1.
     scale_bmm1 = mFixedParams.qkTanhScale != 0.f ? scale_bmm1 / mFixedParams.qkTanhScale : scale_bmm1;
     // The softmax output scale (not used).
@@ -204,7 +205,7 @@ void FusedMHARunnerV2::setupKernelParams(MHARunnerParams runnerParams)
     // 2 scales prepared for scaleBmm1 in the device memory: float scale, float (scale with log2e).
     int64_t scaleBmm1PtrOffset = (mLaunchParams.useBase2ExpTrick ? 1 : 0);
     // Only fp8 kernels need to load scales from the device memory.
-    if (mFixedParams.dataType == DATA_TYPE_E4M3)
+    if (mFixedParams.inputDataType == DATA_TYPE_E4M3)
     {
         mKernelParams.scale_bmm1_d = reinterpret_cast<uint32_t const*>(runnerParams.scaleBmm1Ptr + scaleBmm1PtrOffset);
         mKernelParams.scale_bmm2_d = reinterpret_cast<uint32_t const*>(runnerParams.scaleBmm2Ptr);
@@ -221,6 +222,14 @@ void FusedMHARunnerV2::setupKernelParams(MHARunnerParams runnerParams)
     {
         mKernelParams.paged_kv_cache = runnerParams.pagedKvCache.copyKVBlockArrayForContextFMHA();
     }
+
+    mKernelParams.sage.q.scales = runnerParams.qScalePtr;
+    mKernelParams.sage.k.scales = runnerParams.kScalePtr;
+    mKernelParams.sage.v.scales = runnerParams.vScalePtr;
+
+    mKernelParams.sage.q.max_nblock = runnerParams.qMaxNBlock;
+    mKernelParams.sage.k.max_nblock = runnerParams.kMaxNBlock;
+    mKernelParams.sage.v.max_nblock = runnerParams.vMaxNBlock;
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -244,7 +253,7 @@ void FusedMHARunnerV2::setupLaunchParams(MHARunnerParams runnerParams)
     mLaunchParams.enableQKTanhScale = mFixedParams.qkTanhScale != 0.f;
     // BF16 FMHA only accumulates on FP32.
     // E4M3 FMHA only supports fp32 accumulation currently.
-    mLaunchParams.force_fp32_acc = mFixedParams.dataType == DATA_TYPE_BF16 || mFixedParams.dataType == DATA_TYPE_E4M3
+    mLaunchParams.force_fp32_acc = mFixedParams.inputDataType == DATA_TYPE_BF16 || mFixedParams.inputDataType == DATA_TYPE_E4M3
         || mFixedParams.forceFp32Acc || runnerParams.forceFp32Acc;
     // The attention mask type.
     mLaunchParams.attention_mask_type = mFixedParams.attentionMaskType;
@@ -285,7 +294,7 @@ void FusedMHARunnerV2::setupLaunchParams(MHARunnerParams runnerParams)
     // Only warp-specialized FMHA kernels support FP8 on Hopper.
     // Separate Q + KV input layout: enable warp-specialization kernels when s > 512, otherwise use ampere-style flash
     // attention kernels.
-    if (isSm90 && (mFixedParams.dataType == DATA_TYPE_E4M3 || (separateQKvInput && runnerParams.kvSeqLen > 512)))
+    if (isSm90 && (mFixedParams.inputDataType == DATA_TYPE_E4M3 || (separateQKvInput && runnerParams.kvSeqLen > 512)))
     {
         mLaunchParams.flash_attention = true;
         mLaunchParams.force_unroll = true;
@@ -312,7 +321,7 @@ void FusedMHARunnerV2::setupLaunchParams(MHARunnerParams runnerParams)
         mLaunchParams.kernel_s = 0;
         mLaunchParams.force_unroll = true;
         // enable tiled kernels on Ampere/Ada
-        if (isSm89 && mFixedParams.dataType == DATA_TYPE_E4M3)
+        if (isSm89 && mFixedParams.inputDataType == DATA_TYPE_E4M3)
         {
             // so far Ada QMMA only supports non-tiled kernels.
             mLaunchParams.granular_tiling = false;
@@ -363,8 +372,9 @@ void FusedMHARunnerV2::setupLaunchParams(MHARunnerParams runnerParams)
 // TMA descriptors are used as grid_constant parameters (remove MemCpyH2D operations)
 void FusedMHARunnerV2::setPackedQkvTmaDescriptors(MHARunnerParams runnerParams)
 {
+    // std::cout<<"set packed QKV Tma"<<std::endl;
     // split D into multiple groups in order to match the TMA swizzle mode (128B)
-    uint32_t const d_in_bytes = get_size_in_bytes(mLaunchParams.padded_d, mFixedParams.dataType);
+    uint32_t const d_in_bytes = get_size_in_bytes(mLaunchParams.padded_d, mFixedParams.inputDataType);
     uint32_t const d_groups = d_in_bytes > 128 ? d_in_bytes / 128 : 1;
 
     // separate q, k, v and o tma descriptors
@@ -401,12 +411,13 @@ void FusedMHARunnerV2::setPackedQkvTmaDescriptors(MHARunnerParams runnerParams)
 
     // stride size in bytes. Assumes least significant dim is 1 (?)
     uint64_t tensor_stride_qkv[3];
-    tensor_stride_qkv[0] = get_size_in_bytes(tensor_size_qkv[0], mFixedParams.dataType); // d
+    tensor_stride_qkv[0] = get_size_in_bytes(tensor_size_qkv[0], mFixedParams.inputDataType); // d
     tensor_stride_qkv[1] = tensor_size_qkv[1] * tensor_stride_qkv[0];                    // d*h
     tensor_stride_qkv[2] = tensor_size_qkv[2] * tensor_stride_qkv[1];                    // d*h*3
 
+    // TODO: this is outputDatatype?
     uint64_t tensor_stride_o[3];
-    tensor_stride_o[0] = get_size_in_bytes(tensor_size_o[0], mFixedParams.dataType); // d
+    tensor_stride_o[0] = get_size_in_bytes(tensor_size_o[0], mFixedParams.outputDataType); // d
     tensor_stride_o[1] = tensor_size_o[1] * tensor_stride_o[0];                      // d*h
     tensor_stride_o[2] = tensor_size_o[2] * tensor_stride_o[1];                      // d*h*1
 
@@ -441,7 +452,7 @@ void FusedMHARunnerV2::setPackedQkvTmaDescriptors(MHARunnerParams runnerParams)
     box_size[3] = q_step;
     // Desc Format (data type).
     cudaTmaDescFormat const desc_format
-        = (get_size_in_bytes(mFixedParams.dataType) == 1) ? cudaTmaDescFormat::U8 : cudaTmaDescFormat::F16_RN;
+        = (get_size_in_bytes(mFixedParams.inputDataType) == 1) ? cudaTmaDescFormat::U8 : cudaTmaDescFormat::F16_RN;
     qkv_tma_descriptor.set_tma_desctriptor(qkv_ptr, desc_format, cudaTmaDescInterleave::INTERLEAVE_DISABLED,
         swizzle_mode, cudaTmaDescPromotion::PROMOTION_DISABLED, tensor_size_qkv, tensor_stride_qkv,
         traversal_stride_qkv, box_size, oob_fill, fp32_to_tf32, &mKernelParams.tma_desc_q);
@@ -455,7 +466,7 @@ void FusedMHARunnerV2::setPackedQkvTmaDescriptors(MHARunnerParams runnerParams)
     // O: 16
     // Note: sliding window causal kernel currently has reg spill when TMA store is enabled
     box_size[3] = 16;
-    if ((get_size_in_bytes(mFixedParams.dataType) == 1)
+    if ((get_size_in_bytes(mFixedParams.outputDataType) == 1)
         && mLaunchParams.attention_mask_type != ContextAttentionMaskType::SLIDING_WINDOW_CAUSAL)
     {
         qkv_tma_descriptor.set_tma_desctriptor(o_ptr, desc_format, cudaTmaDescInterleave::INTERLEAVE_DISABLED,
@@ -474,7 +485,7 @@ void FusedMHARunnerV2::setPackedQkvTmaDescriptors(MHARunnerParams runnerParams)
 void FusedMHARunnerV2::setSeparateQKvTmaDescriptors(MHARunnerParams runnerParams)
 {
     // split D into multiple groups in order to match the TMA swizzle mode (128B)
-    uint32_t const d_in_bytes = get_size_in_bytes(mLaunchParams.padded_d, mFixedParams.dataType);
+    uint32_t const d_in_bytes = get_size_in_bytes(mLaunchParams.padded_d, mFixedParams.inputDataType);
     uint32_t const d_groups = d_in_bytes > 128 ? d_in_bytes / 128 : 1;
 
     uint32_t q_step = 0, kv_step = 0;
@@ -500,7 +511,7 @@ void FusedMHARunnerV2::setSeparateQKvTmaDescriptors(MHARunnerParams runnerParams
 
     // stride size in bytes.
     uint64_t tensor_stride_qo[3];
-    tensor_stride_qo[0] = get_size_in_bytes(tensor_size_qo[0], mFixedParams.dataType);
+    tensor_stride_qo[0] = get_size_in_bytes(tensor_size_qo[0], mFixedParams.inputDataType);
     tensor_stride_qo[1] = tensor_size_qo[1] * tensor_stride_qo[0];
     tensor_stride_qo[2] = tensor_size_qo[2] * tensor_stride_qo[1];
 
@@ -515,7 +526,7 @@ void FusedMHARunnerV2::setSeparateQKvTmaDescriptors(MHARunnerParams runnerParams
 
     // Desc Format (data type).
     cudaTmaDescFormat const desc_format
-        = (get_size_in_bytes(mFixedParams.dataType) == 1) ? cudaTmaDescFormat::U8 : cudaTmaDescFormat::F16_RN;
+        = (get_size_in_bytes(mFixedParams.inputDataType) == 1) ? cudaTmaDescFormat::U8 : cudaTmaDescFormat::F16_RN;
 
     // gmma descriptor mode
     uint32_t const d_bytes_per_group = d_in_bytes / d_groups;
@@ -536,7 +547,7 @@ void FusedMHARunnerV2::setSeparateQKvTmaDescriptors(MHARunnerParams runnerParams
 
     // O: 16. Reuse
     box_size_qo[3] = 16;
-    if ((get_size_in_bytes(mFixedParams.dataType) == 1)
+    if ((get_size_in_bytes(mFixedParams.outputDataType) == 1)
         && mLaunchParams.attention_mask_type != ContextAttentionMaskType::SLIDING_WINDOW_CAUSAL)
     {
         qo_tma_descriptor.set_tma_desctriptor(o_ptr, desc_format, cudaTmaDescInterleave::INTERLEAVE_DISABLED,
@@ -564,7 +575,7 @@ void FusedMHARunnerV2::setSeparateQKvTmaDescriptors(MHARunnerParams runnerParams
 
         // Stride size in bytes.
         uint64_t tensor_stride_kv[3];
-        tensor_stride_kv[0] = get_size_in_bytes(tensor_size_kv[0], mFixedParams.dataType);
+        tensor_stride_kv[0] = get_size_in_bytes(tensor_size_kv[0], mFixedParams.inputDataType);
         tensor_stride_kv[1] = tensor_size_kv[1] * tensor_stride_kv[0];
         tensor_stride_kv[2] = tensor_size_kv[2] * tensor_stride_kv[1];
 
@@ -600,7 +611,7 @@ void FusedMHARunnerV2::setSeparateQKvTmaDescriptors(MHARunnerParams runnerParams
 
         // Stride size in bytes.
         uint64_t tensor_stride_kv[3];
-        tensor_stride_kv[0] = get_size_in_bytes(tensor_size_kv[0], mFixedParams.dataType);
+        tensor_stride_kv[0] = get_size_in_bytes(tensor_size_kv[0], mFixedParams.inputDataType);
         tensor_stride_kv[1] = tensor_size_kv[1] * tensor_stride_kv[0];
         tensor_stride_kv[2] = tensor_size_kv[2] * tensor_stride_kv[1];
 
@@ -624,7 +635,7 @@ void FusedMHARunnerV2::run(MHARunnerParams runnerParams)
     // Need to set tma descriptors additionally.
     if (mSM == kSM_90 && mLaunchParams.use_tma)
     {
-        std::cout<<"use TMA"<<std::endl;
+        // std::cout<<"use TMA"<<std::endl;
         switch (mFixedParams.attentionInputLayout)
         {
         case AttentionInputLayout::PACKED_QKV: setPackedQkvTmaDescriptors(runnerParams); break;

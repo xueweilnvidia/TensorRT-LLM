@@ -95,6 +95,10 @@ private:
     // The default copy constructor will leave them as nullptr. clone() shall initialize it.
     UniqPtrWNullCopy<tensorrt_llm::kernels::FusedMHARunnerV2> mFMHARunner;
     UniqPtrWNullCopy<tensorrt_llm::common::CublasMMWrapper> mCublasWrapper;
+
+    static const int mQBlockSize = 64;
+    static const int mKBlockSize = 64;
+    static const int mVBlockSize = 256;
 };
 
 class BertAttentionPluginCreator : public BaseCreator
