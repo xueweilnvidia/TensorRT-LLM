@@ -211,6 +211,14 @@ struct MHARunnerParams
     // The cuda stream.
     cudaStream_t stream;
     bool forceFp32Acc = false;
+
+    float* qScalePtr;
+    float* kScalePtr;
+    float* vScalePtr;
+
+    int qMaxNBlock;
+    int kMaxNBlock;
+    int vMaxNBlock;
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -327,6 +335,18 @@ struct Fused_multihead_attention_params_v2
 
     // is input/output padded
     bool is_s_padded = false;
+
+    struct SageAttention {
+        struct Scales {
+            // ceil(max_seqlen / block_size)
+            int max_nblock;
+            // The scale of each block, layout: (B, H, max_nblock)
+            float* scales;
+        }
+        q, k, v;
+    }
+    sage;
+
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////

@@ -51,7 +51,7 @@ public:
         return (uint64_t) s << 32 | d;
     }
 
-    virtual uint64_t hashID(KernelMeta const& kernelMeta) const
+    virtual uint64_t hashID(KernelMeta const& kernelMeta, bool is_sage) const
     {
         return hashID(kernelMeta.mS, kernelMeta.mD);
     }
@@ -104,9 +104,9 @@ public:
                 std::string::size_type index = name.find("sage");
                 if(index != std::string::npos){
                     std::cout<<name<<std::endl;
-                    mFunctions.insert(std::make_pair(0, funcInfo));
+                    mFunctions.insert(std::make_pair(hashID(kernelMeta, true /*is_sage*/), funcInfo));
                 }else{
-                    mFunctions.insert(std::make_pair(hashID(kernelMeta), funcInfo));
+                    mFunctions.insert(std::make_pair(hashID(kernelMeta, false/*is_sage*/), funcInfo));
                 }
                 int s = static_cast<int>(kernelMeta.mS);
                 if (mValidSequences.find(s) == mValidSequences.end())
@@ -243,30 +243,35 @@ public:
 
     inline uint64_t hashID(unsigned int s, unsigned int d, bool interleaved, bool unroll, bool force_fp32_acc,
         bool flash_attention, bool warp_specialization, bool is_alibi_supported, int attention_mask_type,
-        int input_layout, bool tiled, bool has_qk_tanh_scale) const
+        int input_layout, bool tiled, bool has_qk_tanh_scale, bool is_sage) const
     {
         s = flash_attention ? 0 : s;
         // D <= 2048
-        return (uint64_t) s << 32 | d << 16 | (attention_mask_type << 10) | (input_layout << 8)
+        if (is_sage){
+            return 0;
+        }else{
+            return (uint64_t) s << 32 | d << 16 | (attention_mask_type << 10) | (input_layout << 8)
             | (has_qk_tanh_scale ? 128ull : 0ull) | (is_alibi_supported ? 64ull : 0ull)
             | (warp_specialization ? 32ull : 0ull) | (tiled ? 16ull : 0ull) | (force_fp32_acc ? 8ull : 0ull)
             | (flash_attention ? 4ull : 0ull) | (interleaved ? 2ull : 0ull) | (unroll ? 1ull : 0ull);
+        }
     }
 
-    uint64_t hashID(KernelMeta const& kernelMeta) const override
+    uint64_t hashID(KernelMeta const& kernelMeta, bool is_sage) const override
     {
 
         return hashID(kernelMeta.mS, kernelMeta.mD, kernelMeta.mInterleaved, kernelMeta.mUnrollStep,
             kernelMeta.mFP32Accumulation, kernelMeta.mFlashAttention, kernelMeta.mWarpSpecialization,
             kernelMeta.mAlibiSupported, kernelMeta.mAttentionMaskType, kernelMeta.mAttentionInputLayout,
-            kernelMeta.mTiled, kernelMeta.mEnableQKTanhScale);
+            kernelMeta.mTiled, kernelMeta.mEnableQKTanhScale, is_sage);
     }
 
     // FMHA runner.
     void run(Fused_multihead_attention_params_v2& params, Launch_params& launch_params, cudaStream_t stream) const
     {
         bool forceUnroll = useForceUnroll(params, launch_params);
-        auto const findIter = mFunctions.find(hashFromParams(params, launch_params));
+        auto const findIter = mFunctions.find(hashFromParams(params, launch_params, true/*is_sage*/));
+        std::cout<<"run hash id: "<< hashFromParams(params, launch_params, true/*is_sage*/) <<std::endl;
 
         // Add debug info when kernels are not found.
         TLLM_CHECK_WITH_INFO(findIter != mFunctions.end(),
@@ -293,6 +298,7 @@ public:
 
             if (launch_params.dynamic_scheduler)
             {
+                std::cout<<"dynamic scheduler is true" <<std::endl;
                 // Get the max total M steps
                 size_t m_steps = size_t((params.s + kernelMeta.mUnrollStep - 1) / kernelMeta.mUnrollStep);
                 m_steps = size_t((m_steps + NUM_COMPUTE_GROUPS - 1) / NUM_COMPUTE_GROUPS);
@@ -301,12 +307,17 @@ public:
 
                 block_size.y = std::min(static_cast<int>(params.num_tiles), launch_params.multi_processor_count);
                 // 2 * bytes_per_elt stands for kv cache and bytes_per_elt bytes per element.
-                size_t size_in_bytes = params.b * params.h * params.s * params.d * 2 * get_size_in_bytes(mDataType);
+                size_t size_in_bytes = params.b * params.h * params.s * params.d * 2 * get_size_in_bytes(DATA_TYPE_E4M3);
                 params.use_balanced_scheduling = launch_params.attention_mask_type == ContextAttentionMaskType::CAUSAL
                     && size_in_bytes <= launch_params.device_l2_cache_size;
 
                 block_size.x = 1;
                 block_size.y = std::min(static_cast<int>(params.num_tiles), launch_params.multi_processor_count);
+
+                std::cout<<"m_step: " <<m_steps<<std::endl;
+                std::cout<<"kernelMeta.mUnrollStep: "<< kernelMeta.mUnrollStep<<std::endl;
+                std::cout<<"params.num_tiles: " << params.num_tiles<<std::endl;
+                std::cout<<"launch_params.multi_processor_count: "<< launch_params.multi_processor_count<<std::endl; 
             }
             else
             {
@@ -321,7 +332,7 @@ public:
                     / kernelMeta.mUnrollStep * NUM_COMPUTE_GROUPS);
 
                 // 2 * size_per_element stands for kv cache.
-                size_t size_in_bytes = block_size.y * params.s * params.d * 2 * get_size_in_bytes(mDataType);
+                size_t size_in_bytes = block_size.y * params.s * params.d * 2 * get_size_in_bytes(DATA_TYPE_E4M3);
                 if (size_in_bytes <= launch_params.device_l2_cache_size)
                 {
                     // strategy 1: limit to only 1 wave
@@ -334,6 +345,11 @@ public:
                 }
             }
 
+            std::cout<<"block size x: " << block_size.x <<std::endl;
+            std::cout<<"block size y: " << block_size.y <<std::endl;
+            std::cout<<"block size z: " << block_size.z <<std::endl;
+            std::cout<<"mThreadsPerCTA: " << kernelMeta.mThreadsPerCTA <<std::endl;
+            std::cout<<"mSharedMemBytes: " << kernelMeta.mSharedMemBytes <<std::endl;
             cuErrCheck(mDriver->cuLaunchKernel(func, block_size.x, block_size.y, block_size.z,
                            kernelMeta.mThreadsPerCTA, 1, 1, kernelMeta.mSharedMemBytes, stream, kernelParams, nullptr),
                 mDriver);
@@ -370,7 +386,8 @@ public:
     {
         uint64_t id = hashID(0, params.headSize, 0, 0, params.forceFp32Acc, false, false, false,
             static_cast<int>(params.attentionMaskType), static_cast<int>(params.attentionInputLayout), false,
-            params.qkTanhScale != 0.f);
+            params.qkTanhScale != 0.f, true/*is_sage*/);
+        std::cout<<"hash id: "<< id<<std::endl;
         auto const findIter = std::find_if(mFunctions.begin(), mFunctions.end(), KernelExistPredicate(id));
         return findIter != mFunctions.end();
     }
@@ -378,7 +395,7 @@ public:
     void getStepSize(uint32_t& out_step_q, uint32_t& out_step_kv, Fused_multihead_attention_params_v2 const& params,
         Launch_params const& launch_params) const override
     {
-        auto const findIter = mFunctions.find(hashFromParams(params, launch_params));
+        auto const findIter = mFunctions.find(hashFromParams(params, launch_params, true/*is_sage*/));
         TLLM_CHECK_WITH_INFO(findIter != mFunctions.end(),
             "FMHA kernels are not found (kernel meta info: %d %d %d %d %d %d %d %d %d %d %d) !", launch_params.kernel_s,
             params.d, launch_params.interleaved, launch_params.force_fp32_acc, launch_params.flash_attention,
@@ -389,6 +406,10 @@ public:
         auto const& kernelMeta = mKernelMeta[findIter->second.mMetaInfoIndex];
         out_step_q = kernelMeta.mStepQ;
         out_step_kv = kernelMeta.mStepKV;
+
+        std::cout<<"out_step_q: " <<out_step_q<<std::endl;
+        std::cout<<"out_step_kv: " <<out_step_kv<<std::endl;
+        std::cout<<"kernel name: " << kernelMeta.mFuncName <<std::endl;
     }
 
 private:
@@ -434,14 +455,14 @@ private:
         return forceUnroll;
     }
 
-    uint64_t hashFromParams(Fused_multihead_attention_params_v2 const& params, Launch_params const& launch_params) const
+    uint64_t hashFromParams(Fused_multihead_attention_params_v2 const& params, Launch_params const& launch_params, bool is_sage) const
     {
         bool forceUnroll = useForceUnroll(params, launch_params);
         return hashID(launch_params.kernel_s, params.d, launch_params.interleaved, forceUnroll,
             launch_params.force_fp32_acc, launch_params.flash_attention, launch_params.warp_specialization,
             !launch_params.useKernelWithoutAlibi, static_cast<int>(launch_params.attention_mask_type),
             static_cast<int>(launch_params.attention_input_layout), launch_params.granular_tiling,
-            launch_params.enableQKTanhScale);
+            launch_params.enableQKTanhScale, is_sage);
     }
 };
 

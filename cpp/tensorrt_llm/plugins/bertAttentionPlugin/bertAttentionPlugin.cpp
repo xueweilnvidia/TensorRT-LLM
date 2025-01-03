@@ -169,10 +169,17 @@ size_t BertAttentionPlugin::getWorkspaceSize(nvinfer1::PluginTensorDesc const* i
     std::cout<<"hidden_dim: "<< mNumHeads * mHeadSize <<std::endl;
     const size_t quanted_qkv_size = batch_size * input_seq_len * mNumHeads * mHeadSize * 3;
     const size_t q_scale_size = sizeof(float) * batch_size * ((input_seq_len + mQBlockSize - 1) / mQBlockSize) * mNumHeads;
+    std::cout<<"q_scale_size: "<< batch_size * ((input_seq_len + mQBlockSize - 1) / mQBlockSize) * mNumHeads << std::endl;
     const size_t v_scale_size = sizeof(float) * batch_size * ((input_seq_len + mVBlockSize - 1) / mVBlockSize) * mNumHeads;
+    std::cout<<"v_scale_size: "<< batch_size * ((input_seq_len + mVBlockSize - 1) / mVBlockSize) * mNumHeads << std::endl;
     const size_t k_scale_size = sizeof(float) * batch_size * ((input_seq_len + mKBlockSize - 1) / mKBlockSize) * mNumHeads;
 
-    int const NUM_BUFFERS = 15;
+    const size_t scale_bmm1_device_size = sizeof(float) * 2;
+    const size_t scale_bmm2_device_size = sizeof(float);
+
+    // const size_t alignment = 16;
+
+    int const NUM_BUFFERS = 17;
     size_t workspaces[NUM_BUFFERS];
     workspaces[0] = CUBLAS_WORKSPACE_SIZE;
     workspaces[1] = attention_mask_size;
@@ -190,6 +197,9 @@ size_t BertAttentionPlugin::getWorkspaceSize(nvinfer1::PluginTensorDesc const* i
     workspaces[12] = q_scale_size;
     workspaces[13] = v_scale_size;
     workspaces[14] = k_scale_size;
+
+    workspaces[15] = scale_bmm1_device_size;
+    workspaces[16] = scale_bmm2_device_size;
 
 
     return tc::calculateTotalWorkspaceSize(workspaces, NUM_BUFFERS);
@@ -258,9 +268,15 @@ int BertAttentionPlugin::enqueueImpl(nvinfer1::PluginTensorDesc const* inputDesc
     const size_t fmha_scheduler_counter = mEnableContextFMHA ? sizeof(uint32_t) : 0;
 
     const size_t quanted_qkv_size = batch_size * input_seq_len * mNumHeads * mHeadSize * 3;
+    std::cout<< "quanted_qkv_size: "<< batch_size * input_seq_len * mNumHeads * mHeadSize * 3 <<std::endl;
     const size_t q_scale_size = sizeof(float) * batch_size * ((input_seq_len + mQBlockSize - 1) / mQBlockSize) * mNumHeads;
+    std::cout<< "q_scale_size: " << batch_size * ((input_seq_len + mQBlockSize - 1) / mQBlockSize) * mNumHeads <<std::endl;
     const size_t v_scale_size = sizeof(float) * batch_size * ((input_seq_len + mVBlockSize - 1) / mVBlockSize) * mNumHeads;
+    std::cout<< "v_scale_size: " << batch_size * ((input_seq_len + mVBlockSize - 1) / mVBlockSize) * mNumHeads <<std::endl;
     const size_t k_scale_size = sizeof(float) * batch_size * ((input_seq_len + mKBlockSize - 1) / mKBlockSize) * mNumHeads;
+
+    const size_t scale_bmm1_device_size = sizeof(float) *2;
+    const size_t scale_bmm2_device_size = sizeof(float);
 
     // Workspace pointer shift
     int8_t* workspace_byte_ptr = reinterpret_cast<int8_t*>(workspace);
@@ -281,10 +297,16 @@ int BertAttentionPlugin::enqueueImpl(nvinfer1::PluginTensorDesc const* inputDesc
 
     __nv_fp8_e4m3* quanted_qkv_ptr = reinterpret_cast<__nv_fp8_e4m3*>(tc::nextWorkspacePtr(workspace_byte_ptr, offset, quanted_qkv_size));
     
-
     float* q_scale_ptr = reinterpret_cast<float*>(tc::nextWorkspacePtr(workspace_byte_ptr, offset, q_scale_size));
+    // q_scale_ptr = (void*)(size_t(q_scale_ptr) + 16 - size_t(q_scale_ptr) % 16);
     float* k_scale_ptr = reinterpret_cast<float*>(tc::nextWorkspacePtr(workspace_byte_ptr, offset, k_scale_size));
+    // k_scale_ptr = (void*)(size_t(k_scale_ptr) + 16 - size_t(k_scale_ptr) % 16);
     float* v_scale_ptr = reinterpret_cast<float*>(tc::nextWorkspacePtr(workspace_byte_ptr, offset, v_scale_size));
+    // v_scale_ptr = (void*)(size_t(v_scale_ptr) + 16 - size_t(v_scale_ptr) % 16);
+
+    float* scale_bmm1_ptr = reinterpret_cast<float*>(tc::nextWorkspacePtr(workspace_byte_ptr, offset, scale_bmm1_device_size));
+    float* scale_bmm2_ptr = reinterpret_cast<float*>(tc::nextWorkspacePtr(workspace_byte_ptr, offset, scale_bmm2_device_size));
+
 
     // build attention_mask, cu_seqlens, and padding_offset tensors
     BuildDecoderInfoParams<T> params;
@@ -300,6 +322,10 @@ int BertAttentionPlugin::enqueueImpl(nvinfer1::PluginTensorDesc const* inputDesc
     params.fmhaTileCounter = fmha_tile_counter_ptr;
     invokeBuildDecoderInfo(params, stream);
     sync_check_cuda_error();
+
+    // int test[3];
+    // cudaMemcpy(test, cu_seqlens, 3 * sizeof(int), cudaMemcpyDeviceToHost);
+    // std::cout<<"test: " << test[0] << " " <<test[1] << " "<< test[2] << std::endl;
 
     auto const gemm_data_type = tc::CudaDataType<T>::value;
     int const attention_seq_len_1 = request_seq_len; // q length
@@ -339,6 +365,16 @@ int BertAttentionPlugin::enqueueImpl(nvinfer1::PluginTensorDesc const* inputDesc
         
         sync_check_cuda_error();
 
+        float bmm1[2];
+        bmm1[0] = qk_scale;
+        bmm1[1] = qk_scale * (float)1.4426950408889634074;
+        cudaMemcpy(scale_bmm1_ptr, bmm1, 2 * sizeof(float), cudaMemcpyHostToDevice);
+
+        float bmm2[1];
+        bmm2[0] = 1.0;
+        cudaMemcpy(scale_bmm2_ptr, bmm2, sizeof(float), cudaMemcpyHostToDevice);
+        sync_check_cuda_error();
+
         // Construct the fmha params for running kernels.
         MHARunnerParams fmhaParams{};
         fmhaParams.b = request_batch_size;
@@ -346,12 +382,24 @@ int BertAttentionPlugin::enqueueImpl(nvinfer1::PluginTensorDesc const* inputDesc
         fmhaParams.kvSeqLen = request_seq_len;
         fmhaParams.totalQSeqLen = request_batch_size * request_seq_len;
         // Device buffer pointers.
-        fmhaParams.qkvPtr = attention_input;
+        fmhaParams.qkvPtr = quanted_qkv_ptr;
         fmhaParams.outputPtr = context_buf_;
         fmhaParams.cuQSeqLenPtr = cu_seqlens;
         fmhaParams.cuKvSeqLenPtr = cu_seqlens;
         fmhaParams.tileCounterPtr = fmha_tile_counter_ptr;
         fmhaParams.stream = stream;
+
+        fmhaParams.scaleBmm1Ptr = scale_bmm1_ptr;
+        fmhaParams.scaleBmm2Ptr = scale_bmm2_ptr;
+
+        fmhaParams.qScalePtr = q_scale_ptr;
+        fmhaParams.kScalePtr = k_scale_ptr;
+        fmhaParams.vScalePtr = v_scale_ptr;
+
+        fmhaParams.qMaxNBlock = (input_seq_len + mQBlockSize - 1) / mQBlockSize;
+        fmhaParams.kMaxNBlock = (input_seq_len + mKBlockSize - 1) / mKBlockSize;
+        fmhaParams.vMaxNBlock = (input_seq_len + mVBlockSize - 1) / mVBlockSize;
+        // std::cout<<"qMaxNBlock: "<< fmhaParams.qMaxNBlock<<std::endl;
 
         // Run the fmha kernel.
         mFMHARunner->run(fmhaParams);
@@ -559,7 +607,7 @@ int BertAttentionPlugin::initialize() noexcept
 
         // Construct the fmha runner.
         MHARunnerFixedParams fmhaParams{};
-        fmhaParams.dataType = data_type;
+        fmhaParams.dataType = DATA_TYPE_BF16;
         // add input and output dataType
         fmhaParams.inputDataType = DATA_TYPE_E4M3;
         fmhaParams.outputDataType = DATA_TYPE_BF16;
