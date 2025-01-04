@@ -103,7 +103,7 @@ public:
                 std::string name = kernelMeta.mFuncName;
                 std::string::size_type index = name.find("sage");
                 if(index != std::string::npos){
-                    std::cout<<name<<std::endl;
+                    // std::cout<<name<<std::endl;
                     mFunctions.insert(std::make_pair(hashID(kernelMeta, true /*is_sage*/), funcInfo));
                 }else{
                     mFunctions.insert(std::make_pair(hashID(kernelMeta, false/*is_sage*/), funcInfo));
@@ -271,7 +271,7 @@ public:
     {
         bool forceUnroll = useForceUnroll(params, launch_params);
         auto const findIter = mFunctions.find(hashFromParams(params, launch_params, true/*is_sage*/));
-        std::cout<<"run hash id: "<< hashFromParams(params, launch_params, true/*is_sage*/) <<std::endl;
+        // std::cout<<"run hash id: "<< hashFromParams(params, launch_params, true/*is_sage*/) <<std::endl;
 
         // Add debug info when kernels are not found.
         TLLM_CHECK_WITH_INFO(findIter != mFunctions.end(),
@@ -298,7 +298,7 @@ public:
 
             if (launch_params.dynamic_scheduler)
             {
-                std::cout<<"dynamic scheduler is true" <<std::endl;
+                // std::cout<<"dynamic scheduler is true" <<std::endl;
                 // Get the max total M steps
                 size_t m_steps = size_t((params.s + kernelMeta.mUnrollStep - 1) / kernelMeta.mUnrollStep);
                 m_steps = size_t((m_steps + NUM_COMPUTE_GROUPS - 1) / NUM_COMPUTE_GROUPS);
@@ -314,10 +314,10 @@ public:
                 block_size.x = 1;
                 block_size.y = std::min(static_cast<int>(params.num_tiles), launch_params.multi_processor_count);
 
-                std::cout<<"m_step: " <<m_steps<<std::endl;
-                std::cout<<"kernelMeta.mUnrollStep: "<< kernelMeta.mUnrollStep<<std::endl;
-                std::cout<<"params.num_tiles: " << params.num_tiles<<std::endl;
-                std::cout<<"launch_params.multi_processor_count: "<< launch_params.multi_processor_count<<std::endl; 
+                // std::cout<<"m_step: " <<m_steps<<std::endl;
+                // std::cout<<"kernelMeta.mUnrollStep: "<< kernelMeta.mUnrollStep<<std::endl;
+                // std::cout<<"params.num_tiles: " << params.num_tiles<<std::endl;
+                // std::cout<<"launch_params.multi_processor_count: "<< launch_params.multi_processor_count<<std::endl; 
             }
             else
             {
@@ -345,11 +345,11 @@ public:
                 }
             }
 
-            std::cout<<"block size x: " << block_size.x <<std::endl;
-            std::cout<<"block size y: " << block_size.y <<std::endl;
-            std::cout<<"block size z: " << block_size.z <<std::endl;
-            std::cout<<"mThreadsPerCTA: " << kernelMeta.mThreadsPerCTA <<std::endl;
-            std::cout<<"mSharedMemBytes: " << kernelMeta.mSharedMemBytes <<std::endl;
+            // std::cout<<"block size x: " << block_size.x <<std::endl;
+            // std::cout<<"block size y: " << block_size.y <<std::endl;
+            // std::cout<<"block size z: " << block_size.z <<std::endl;
+            // std::cout<<"mThreadsPerCTA: " << kernelMeta.mThreadsPerCTA <<std::endl;
+            // std::cout<<"mSharedMemBytes: " << kernelMeta.mSharedMemBytes <<std::endl;
             cuErrCheck(mDriver->cuLaunchKernel(func, block_size.x, block_size.y, block_size.z,
                            kernelMeta.mThreadsPerCTA, 1, 1, kernelMeta.mSharedMemBytes, stream, kernelParams, nullptr),
                 mDriver);
@@ -387,7 +387,7 @@ public:
         uint64_t id = hashID(0, params.headSize, 0, 0, params.forceFp32Acc, false, false, false,
             static_cast<int>(params.attentionMaskType), static_cast<int>(params.attentionInputLayout), false,
             params.qkTanhScale != 0.f, true/*is_sage*/);
-        std::cout<<"hash id: "<< id<<std::endl;
+        // std::cout<<"hash id: "<< id<<std::endl;
         auto const findIter = std::find_if(mFunctions.begin(), mFunctions.end(), KernelExistPredicate(id));
         return findIter != mFunctions.end();
     }
@@ -407,9 +407,9 @@ public:
         out_step_q = kernelMeta.mStepQ;
         out_step_kv = kernelMeta.mStepKV;
 
-        std::cout<<"out_step_q: " <<out_step_q<<std::endl;
-        std::cout<<"out_step_kv: " <<out_step_kv<<std::endl;
-        std::cout<<"kernel name: " << kernelMeta.mFuncName <<std::endl;
+        // std::cout<<"out_step_q: " <<out_step_q<<std::endl;
+        // std::cout<<"out_step_kv: " <<out_step_kv<<std::endl;
+        // std::cout<<"kernel name: " << kernelMeta.mFuncName <<std::endl;
     }
 
 private:

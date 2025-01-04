@@ -154,7 +154,7 @@ void FusedMHARunnerV2::setupKernelParams(MHARunnerParams runnerParams)
     // (bmm1_output * scale_bmm1 + alibi) * scale_after_alibi
     float const scale_after_alibi = mFixedParams.scaleAlibi ? inv_sqrt_scale : 1.0f;
     float scale_bmm1 = mFixedParams.scaleAlibi ? 1.0f : inv_sqrt_scale;
-    std::cout<<"scale bmm1: " <<scale_bmm1 <<std::endl;
+    // std::cout<<"scale bmm1: " <<scale_bmm1 <<std::endl;
     // Fuse 1.0f / qk_tanh_scale into scale_bmm1.
     scale_bmm1 = mFixedParams.qkTanhScale != 0.f ? scale_bmm1 / mFixedParams.qkTanhScale : scale_bmm1;
     // The softmax output scale (not used).
@@ -372,7 +372,7 @@ void FusedMHARunnerV2::setupLaunchParams(MHARunnerParams runnerParams)
 // TMA descriptors are used as grid_constant parameters (remove MemCpyH2D operations)
 void FusedMHARunnerV2::setPackedQkvTmaDescriptors(MHARunnerParams runnerParams)
 {
-    std::cout<<"set packed QKV Tma"<<std::endl;
+    // std::cout<<"set packed QKV Tma"<<std::endl;
     // split D into multiple groups in order to match the TMA swizzle mode (128B)
     uint32_t const d_in_bytes = get_size_in_bytes(mLaunchParams.padded_d, mFixedParams.inputDataType);
     uint32_t const d_groups = d_in_bytes > 128 ? d_in_bytes / 128 : 1;
@@ -635,7 +635,7 @@ void FusedMHARunnerV2::run(MHARunnerParams runnerParams)
     // Need to set tma descriptors additionally.
     if (mSM == kSM_90 && mLaunchParams.use_tma)
     {
-        std::cout<<"use TMA"<<std::endl;
+        // std::cout<<"use TMA"<<std::endl;
         switch (mFixedParams.attentionInputLayout)
         {
         case AttentionInputLayout::PACKED_QKV: setPackedQkvTmaDescriptors(runnerParams); break;

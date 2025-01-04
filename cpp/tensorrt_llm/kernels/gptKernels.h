@@ -223,21 +223,25 @@ void invokeBuildDecoderInfo(BuildDecoderInfoParams<T> const& params, cudaStream_
 template <
     int HeadSize,
     int BlockSizeQ,
-    int BlockSizeKV,
+    int BlockSizeK,
+    int BlockSizeV,
     typename T,
     typename T_quant
 >
 void sage_quant(
     // host var
-    unsigned int batch_size, unsigned int head_num, unsigned int head_size, unsigned int max_seq_len,
-    // device var
+    unsigned int batch_size, unsigned int head_num, unsigned int max_seq_len, bool smooth_k,
+    // device input
     const void* q, const void* k, const void* v,
-    int stride_q, int stride_k, int stride_v,
+    const int stride_q, const int stride_k, const int stride_v,
     const int* cu_seqlens_q, const int* cu_seqlens_kv,
-    // int block_size_q, int block_size_k, int block_size_v,
-    // output
+    // sizeof(workspace) = batch_size * head_num * head_size * sizeof(T)
+    void* workspace,
+    // device output
     void* quant_q, void* quant_k, void* quant_v,
     float* scales_q, float* scales_k, float* scales_v);
+
+
 
 } // namespace kernels
 } // namespace tensorrt_llm
