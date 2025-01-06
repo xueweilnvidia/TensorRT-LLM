@@ -226,7 +226,8 @@ template <
     int BlockSizeK,
     int BlockSizeV,
     typename T,
-    typename T_quant
+    typename TQuant,
+    typename TSmoothK
 >
 void sage_quant(
     // host var
@@ -235,12 +236,12 @@ void sage_quant(
     const void* q, const void* k, const void* v,
     const int stride_q, const int stride_k, const int stride_v,
     const int* cu_seqlens_q, const int* cu_seqlens_kv,
-    // sizeof(workspace) = batch_size * head_num * head_size * sizeof(T)
+    // sizeof(workspace) = batch_size * head_num * head_size * sizeof(TSmoothK)
     void* workspace,
     // device output
     void* quant_q, void* quant_k, void* quant_v,
-    float* scales_q, float* scales_k, float* scales_v);
-
+    float* scales_q, float* scales_k, float* scales_v,
+    cudaStream_t stream);
 
 
 } // namespace kernels

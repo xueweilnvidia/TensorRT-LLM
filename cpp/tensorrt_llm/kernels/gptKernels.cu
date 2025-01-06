@@ -321,35 +321,37 @@ __global__ void updatePaddingCountKernel(int* paddingPerSeq, int const* seqLengt
 }
 
 
-
-template 
-void sage_quant <128, 64, 64, 256, __nv_bfloat16, __nv_fp8_e4m3>(
+template void sage_quant<128, 64, 64, 256, __nv_bfloat16, __nv_fp8_e4m3, float>(
     // host var
     unsigned int batch_size, unsigned int head_num, unsigned int max_seq_len, bool smooth_k,
     // device input
     const void* q, const void* k, const void* v,
     const int stride_q, const int stride_k, const int stride_v,
     const int* cu_seqlens_q, const int* cu_seqlens_kv,
-    // sizeof(workspace) = batch_size * head_num * head_size * sizeof(T)
+    // sizeof(workspace) = batch_size * head_num * head_size * sizeof(TSmoothK)
     void* workspace,
     // device output
     void* quant_q, void* quant_k, void* quant_v,
-    float* scales_q, float* scales_k, float* scales_v);
+    float* scales_q, float* scales_k, float* scales_v,
+    cudaStream_t stream);
 
 
 template <
     int HeadSize,
     int kThreadCount,
-    typename T
+    int kTokensPerThreadBlock,
+    typename T,
+    typename TSmoothK
 >
 __global__ void k_mean_kernel(
+    const int head_num,
     const void* k,
-    int stride_k,
+    const int stride_k,
     const int* cu_seqlens_kv,
     void* k_mean
 ) {
-    int batch_id = blockIdx.z;
-    int head_id = blockIdx.y;
+    int batch_id = blockIdx.y / head_num;
+    int head_id = blockIdx.y % head_num;
     int channel_id = blockIdx.x * kThreadCount + threadIdx.x;
 
     if (channel_id >= HeadSize)
@@ -357,6 +359,13 @@ __global__ void k_mean_kernel(
 
     int seq_start = cu_seqlens_kv[batch_id];
     int seq_end = cu_seqlens_kv[batch_id + 1];
+    int tokens_in_seq = seq_end - seq_start;
+
+    seq_start += blockIdx.z * kTokensPerThreadBlock;
+    if (seq_start >= seq_end)
+        return;
+    
+    seq_end = min(seq_start + kTokensPerThreadBlock, seq_end);
 
     float channel_mean = 0.f;
 
@@ -367,14 +376,12 @@ __global__ void k_mean_kernel(
         input += stride_k;
     }
 
-    channel_mean /= static_cast<float>(seq_end - seq_start);
+    channel_mean /= static_cast<float>(tokens_in_seq);
 
-    int head_num = gridDim.y;
-    T *output = reinterpret_cast<T*>(k_mean) + batch_id * head_num * HeadSize + head_id * HeadSize + channel_id;
+    TSmoothK *output = reinterpret_cast<TSmoothK*>(k_mean) + batch_id * head_num * HeadSize + head_id * HeadSize + channel_id;
     
-    *output = static_cast<T>(channel_mean);
+    atomicAdd(output, channel_mean);
 }
-
 
 template <
     int HeadSize,
@@ -382,7 +389,8 @@ template <
     int BlockSizeK,
     int BlockSizeV,
     typename T,
-    typename T_quant
+    typename TQuant,
+    typename TSmooth
 >
 __global__ void sage_quant_kernel(
     const void* q, const void* k, const void* v,
@@ -478,19 +486,19 @@ __global__ void sage_quant_kernel(
                               qblock_id;
         *scales_q_ptr = block_scale;
 
-        T_quant local_input_fp8[tbItery * tbIterx * kElementsAccess];
+        TQuant local_input_fp8[tbItery * tbIterx * kElementsAccess];
 
         for (int i = 0; i < tbItery * tbIterx * kElementsAccess; i++)
         {
-            local_input_fp8[i] = static_cast<T_quant>(static_cast<float>(local_input[i]) / block_scale);
+            local_input_fp8[i] = static_cast<TQuant>(static_cast<float>(local_input[i]) / block_scale);
         }
         
-        T_quant *output = reinterpret_cast<T_quant *>(quant_q) + seq_id * stride_q + head_id * HeadSize + col_id * kElementsAccess;
+        TQuant *output = reinterpret_cast<TQuant *>(quant_q) + seq_id * stride_q + head_id * HeadSize + col_id * kElementsAccess;
 
         for (int y_ = 0; y_ < tbItery; y_++) {
 
-            T_quant *local_output_ptr = local_input_fp8 + y_ * tbIterx * kElementsAccess;
-            T_quant *output_ptr = output + y_ * tbDimy * stride_q;
+            TQuant *local_output_ptr = local_input_fp8 + y_ * tbIterx * kElementsAccess;
+            TQuant *output_ptr = output + y_ * tbDimy * stride_q;
 
             if (seq_id >= seq_end)
                 break;
@@ -520,17 +528,20 @@ __global__ void sage_quant_kernel(
 
         const T *input = reinterpret_cast<const T*>(k) + seq_id * stride_k + head_id * HeadSize + col_id * kElementsAccess;
 
-        T local_k_mean[tbIterx * kElementsAccess];
+        TSmooth local_k_mean[tbIterx * kElementsAccess];
 
         if (smooth_k)
         {
             int head_num = gridDim.y / 3;
-            const T *k_mean_ptr = reinterpret_cast<const T *>(k_mean) +
+            const TSmooth *k_mean_ptr = reinterpret_cast<const TSmooth *>(k_mean) +
                                 batch_id * head_num * HeadSize +
                                 head_id * HeadSize +
                                 col_id * kElementsAccess;
             for (int x_ = 0; x_ < tbIterx; x_++) {
-                *reinterpret_cast<float4 *>(local_k_mean + x_ * kElementsAccess) = *reinterpret_cast<const float4 *>(k_mean_ptr);
+                for (int i = 0; i < sizeof(TSmooth) / sizeof(T); i++) {
+                    *(reinterpret_cast<float4 *>(local_k_mean + x_ * kElementsAccess) + i) = *(reinterpret_cast<const float4 *>(k_mean_ptr) + i);
+                }
+
                 k_mean_ptr += tbDimx * kElementsAccess;
             }
         }
@@ -599,19 +610,19 @@ __global__ void sage_quant_kernel(
                             qblock_id;
         *scales_ptr = block_scale;
 
-        T_quant *output = reinterpret_cast<T_quant *>(quant_k) + seq_id * stride_k + head_id * HeadSize + col_id * kElementsAccess;
+        TQuant *output = reinterpret_cast<TQuant *>(quant_k) + seq_id * stride_k + head_id * HeadSize + col_id * kElementsAccess;
 
-        T_quant local_input_fp8[tbItery * tbIterx * kElementsAccess];
+        TQuant local_input_fp8[tbItery * tbIterx * kElementsAccess];
 
         for (int i = 0; i < tbItery * tbIterx * kElementsAccess; i++)
         {
-            local_input_fp8[i] = static_cast<T_quant>(static_cast<float>(local_input[i]) / block_scale);
+            local_input_fp8[i] = static_cast<TQuant>(static_cast<float>(local_input[i]) / block_scale);
         }
         
         for (int y_ = 0; y_ < tbItery; y_++) {
 
-            T_quant *local_output_ptr = local_input_fp8 + y_ * tbIterx * kElementsAccess;
-            T_quant *output_ptr = output + y_ * tbDimy * stride_k;
+            TQuant *local_output_ptr = local_input_fp8 + y_ * tbIterx * kElementsAccess;
+            TQuant *output_ptr = output + y_ * tbDimy * stride_k;
 
             if (seq_id >= seq_end)
                 break;
@@ -700,19 +711,19 @@ __global__ void sage_quant_kernel(
                             qblock_id;
         *scales_ptr = block_scale;
 
-        T_quant *output = reinterpret_cast<T_quant *>(quant_v) + seq_id * stride_v + head_id * HeadSize + col_id * kElementsAccess;
+        TQuant *output = reinterpret_cast<TQuant *>(quant_v) + seq_id * stride_v + head_id * HeadSize + col_id * kElementsAccess;
 
-        T_quant local_input_fp8[tbItery * tbIterx * kElementsAccess];
+        TQuant local_input_fp8[tbItery * tbIterx * kElementsAccess];
 
         for (int i = 0; i < tbItery * tbIterx * kElementsAccess; i++)
         {
-            local_input_fp8[i] = static_cast<T_quant>(static_cast<float>(local_input[i]) / block_scale);
+            local_input_fp8[i] = static_cast<TQuant>(static_cast<float>(local_input[i]) / block_scale);
         }
         
         for (int y_ = 0; y_ < tbItery; y_++) {
 
-            T_quant *local_output_ptr = local_input_fp8 + y_ * tbIterx * kElementsAccess;
-            T_quant *output_ptr = output + y_ * tbDimy * stride_v;
+            TQuant *local_output_ptr = local_input_fp8 + y_ * tbIterx * kElementsAccess;
+            TQuant *output_ptr = output + y_ * tbDimy * stride_v;
 
             if (seq_id >= seq_end)
                 break;
@@ -731,13 +742,16 @@ __global__ void sage_quant_kernel(
 }
 
 
+
+
 template <
     int HeadSize,
     int BlockSizeQ,
     int BlockSizeK,
     int BlockSizeV,
     typename T,
-    typename T_quant
+    typename TQuant,
+    typename TSmoothK
 >
 void sage_quant(
     // host var
@@ -746,11 +760,12 @@ void sage_quant(
     const void* q, const void* k, const void* v,
     const int stride_q, const int stride_k, const int stride_v,
     const int* cu_seqlens_q, const int* cu_seqlens_kv,
-    // sizeof(workspace) = batch_size * head_num * head_size * sizeof(T)
+    // sizeof(workspace) = batch_size * head_num * head_size * sizeof(TSmoothK)
     void* workspace,
     // device output
     void* quant_q, void* quant_k, void* quant_v,
-    float* scales_q, float* scales_k, float* scales_v)
+    float* scales_q, float* scales_k, float* scales_v,
+    cudaStream_t stream)
 {
     // if (BlockSizeQ % BlockSizeKV != 0) {
     //     printf("Failed, BlockSizeQ should be divisible by BlockSizeKV. %s:%d\n", __FILE__, __LINE__);                      \
@@ -762,14 +777,17 @@ void sage_quant(
     if (smooth_k)
     {
 
+        const int tokens_per_block = 1024;
         const int block = 128;
         dim3 grid(
             (HeadSize + block - 1) / block,
-            head_num,
-            batch_size
+            batch_size * head_num,
+            (max_seq_len + tokens_per_block - 1) / tokens_per_block
         );
 
-        k_mean_kernel<HeadSize, block, T><<<grid, block>>>(
+        cudaMemsetAsync(k_mean, 0, batch_size * head_num * HeadSize * sizeof(TSmoothK), stream);
+        k_mean_kernel<HeadSize, block, tokens_per_block, T, TSmoothK><<<grid, block, 0, stream>>>(
+            head_num,
             k,
             stride_k,
             cu_seqlens_kv,
@@ -786,7 +804,7 @@ void sage_quant(
     );
 
     sage_quant_kernel<HeadSize, BlockSizeQ, BlockSizeK, BlockSizeV,
-                      T, T_quant><<<grid, 128>>>(
+                    T, TQuant, TSmoothK><<<grid, 128, 0, stream>>>(
         q, k, v,
         stride_q, stride_k, stride_v,
         cu_seqlens_q, cu_seqlens_kv, k_mean,

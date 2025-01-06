@@ -177,7 +177,7 @@ size_t BertAttentionPlugin::getWorkspaceSize(nvinfer1::PluginTensorDesc const* i
     const size_t scale_bmm1_device_size = sizeof(float) * 2;
     const size_t scale_bmm2_device_size = sizeof(float);
 
-    const size_t sage_quant_space_size = size * batch_size * mNumHeads * mHeadSize;
+    const size_t sage_quant_space_size = sizeof(float) * batch_size * mNumHeads * mHeadSize;
 
     // const size_t alignment = 16;
 
@@ -280,7 +280,7 @@ int BertAttentionPlugin::enqueueImpl(nvinfer1::PluginTensorDesc const* inputDesc
 
     const size_t scale_bmm1_device_size = sizeof(float) *2;
     const size_t scale_bmm2_device_size = sizeof(float);
-    const size_t sage_quant_space_size = sizeof(T) * batch_size * mNumHeads * mHeadSize;
+    const size_t sage_quant_space_size = sizeof(float) * batch_size * mNumHeads * mHeadSize;
 
     // Workspace pointer shift
     int8_t* workspace_byte_ptr = reinterpret_cast<int8_t*>(workspace);
@@ -355,7 +355,7 @@ int BertAttentionPlugin::enqueueImpl(nvinfer1::PluginTensorDesc const* inputDesc
     if (mEnableContextFMHA)
     {
         // right now, this kernel only support 128 headsize
-        sage_quant<128, 64, 64, 256, __nv_bfloat16, __nv_fp8_e4m3>(
+        sage_quant<128, 64, 64, 256, __nv_bfloat16, __nv_fp8_e4m3, float>(
         // host var
         batch_size, mNumHeads, input_seq_len, true,
         // device var
@@ -370,7 +370,8 @@ int BertAttentionPlugin::enqueueImpl(nvinfer1::PluginTensorDesc const* inputDesc
         quanted_qkv_ptr, quanted_qkv_ptr + mNumHeads * mHeadSize, quanted_qkv_ptr + 2 * mNumHeads * mHeadSize,
         // quanted_qkv_ptr, quanted_qkv_ptr + mNumHeads * mHeadSize, contex,
         // scales
-        q_scale_ptr, k_scale_ptr, v_scale_ptr);        
+        q_scale_ptr, k_scale_ptr, v_scale_ptr, stream);
+
         sync_check_cuda_error();
 
         // Construct the fmha params for running kernels.
