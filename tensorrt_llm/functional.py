@@ -451,6 +451,19 @@ class Tensor(object):
         See functional.sqrt.
         '''
         return sqrt(self)
+    
+    def squeeze(self, dim, zero_is_placeholder):
+        '''
+        See functional.squeeze.
+        '''
+        return squeeze(self, dim, zero_is_placeholder)
+
+    def unsqueeze(self, dim):
+        '''
+        See functional.squeeze.
+        '''
+        return unsqueeze(self, dim)
+
 
     def log(self):
         '''
@@ -2059,6 +2072,8 @@ def select(input: Tensor, dim: int, index: Union[Tensor, int]) -> Tensor:
         index = constant(int32_array([index]))
     assert index.rank() == 1 and index.size(
         0) == 1, f"index should have rank 1, got {index.rank()}"
+    
+    dim = dim_resolve_negative(dim, input.ndim())[0]
 
     new_shape = []
     for i in range(input.rank()):
@@ -3650,6 +3665,7 @@ def unbind(input: Tensor, dim: int = 0):
     '''
     ndim = input.ndim()
     outputs = split(input, 1, dim)
+    dim = dim_resolve_negative(dim, input.ndim())[0]
     output_shape = [input.shape[i] for i in range(ndim) if i != dim]
     return [output.view(output_shape) for output in outputs]
 
