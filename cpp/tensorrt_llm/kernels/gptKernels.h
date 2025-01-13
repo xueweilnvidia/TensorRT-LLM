@@ -231,7 +231,8 @@ template <
 >
 void sage_quant(
     // host var
-    unsigned int batch_size, unsigned int head_num, unsigned int max_seq_len, bool smooth_k,
+    unsigned int batch_size, unsigned int head_num, unsigned int max_seq_len,
+    bool smooth_k, bool is_padded,
     // device input
     const void* q, const void* k, const void* v,
     const int stride_q, const int stride_k, const int stride_v,

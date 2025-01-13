@@ -357,7 +357,7 @@ int BertAttentionPlugin::enqueueImpl(nvinfer1::PluginTensorDesc const* inputDesc
         // right now, this kernel only support 128 headsize
         sage_quant<128, 64, 64, 256, __nv_bfloat16, __nv_fp8_e4m3, float>(
         // host var
-        batch_size, mNumHeads, input_seq_len, true,
+        batch_size, mNumHeads, input_seq_len, true, true,
         // device var
         // q k v
         attention_input, attention_input + mNumHeads * mHeadSize, attention_input + 2 * mNumHeads * mHeadSize,
