@@ -35,6 +35,8 @@ from tensorrt_llm.plugin.plugin import ContextFMHAType
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 from utils.util import skip_fp32_accum_pre_ampere, unittest_name_func
 
+torch.set_printoptions(precision=4, threshold=None, edgeitems=None, linewidth=None, profile=None, sci_mode=False)
+
 
 
 def test_bert_attention(batch_size, in_len, num_heads, head_size,
@@ -97,19 +99,33 @@ def test_bert_attention(batch_size, in_len, num_heads, head_size,
 
     input_lengths = torch.ones(
         (batch_size, ), dtype=torch.int32, device='cuda') * in_len
-    # input_lengths[0] = 5120
-    # input_lengths[1] = 20
+    # input_lengths[0] = 118700
+    # input_lengths[1] = 6000
 
     # Context stage
     shape_dict['input'] = (batch_size, in_len, 3, hidden_size)
     shape_dict['output'] = (batch_size, in_len, 1, hidden_size)
 
-    input_tensor = torch.randn(
-        shape_dict['input'],
-        dtype=tensorrt_llm._utils.str_dtype_to_torch(dtype),
-        device='cuda')
-    input_tensor[:, 0:32, :, :] = input_tensor[:, 0:32, :, :] * 5
-    input_tensor[:, 128:160, :, :] = input_tensor[:, 128:160, :, :] * 10
+    # input_tensor = torch.randn(
+    #     shape_dict['input'],
+    #     dtype=tensorrt_llm._utils.str_dtype_to_torch(dtype),
+    #     device='cuda')
+    # input_tensor[:, 0:32, :, :] = input_tensor[:, 0:32, :, :] * 5
+    # input_tensor[:, 128:160, :, :] = input_tensor[:, 128:160, :, :] * 10
+
+    q = torch.load("input_tensor/q.pt").reshape(batch_size, in_len, hidden_size).unsqueeze(2)
+    # q = torch.load("input_tensor/q.pt")
+    # print(q.shape)
+    k = torch.load("input_tensor/k.pt").reshape(batch_size, in_len, hidden_size).unsqueeze(2)
+    v = torch.load("input_tensor/v.pt").reshape(batch_size, in_len, hidden_size).unsqueeze(2)
+
+    input_tensor = torch.concat([q, k, v], 2)
+    print(input_tensor.shape)
+
+    # for i in range(3000):
+    #     start = i * 32
+    #     end = i*32 + 32
+    #     input_tensor[:, start:end, :, :] = input_tensor[:, start:end,:, :] * input_tensor[0, i, 0, 0] * (i%6 + 1)
 
     output = torch.zeros(
         shape_dict['output'],
@@ -131,14 +147,31 @@ def test_bert_attention(batch_size, in_len, num_heads, head_size,
     k = input_tensor[:,:,1,:].squeeze().reshape(batch_size, in_len, num_heads, head_size)
     v = input_tensor[:,:,2,:].squeeze().reshape(batch_size, in_len, num_heads, head_size)
 
+    # q = q[1:2, 0:6000, :, :]
+    # k = k[1:2, 0:6000, :, :]
+    # v = v[1:2, 0:6000, :, :]
+
     attn_output1 = flash_attn_func(q, k, v)
 
-    output = output
+    output = output.reshape(batch_size, in_len, num_heads, head_size)
+
+    # attn_output1 = attn_output1[:, 0:6000, :, :]
+    # output = output[1:2, 0:6000, :, :]
     print (output)
     print (attn_output1)
 
     attn_output = output.to(torch.float32).reshape(-1).to("cuda")
     attn_output1 = attn_output1.to(torch.float32).reshape(-1)
+
+    max_diff = torch.max(torch.abs(attn_output - attn_output1))
+    print("max_diff: ", max_diff)
+    max_output = torch.max(torch.abs(attn_output))
+    print("max: ", max_output)
+
+    mean_diff = torch.mean(torch.abs(attn_output - attn_output1))
+    print("mean_diff: ", mean_diff)
+    mean_output = torch.mean(torch.abs(attn_output))
+    print("mean: ", mean_output)
  
     a = torch.norm(attn_output)
     b = torch.norm(attn_output1)
@@ -158,4 +191,4 @@ def test_bert_attention(batch_size, in_len, num_heads, head_size,
 
 
 if __name__ == "__main__":
-    test_bert_attention(1, 118800, 3, 128, ContextFMHAType.enabled_with_fp32_acc, "bfloat16")
+    test_bert_attention(3, 9279, 24, 128, ContextFMHAType.enabled_with_fp32_acc, "bfloat16")
