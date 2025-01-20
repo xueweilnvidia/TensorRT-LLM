@@ -470,7 +470,7 @@ __global__ void sage_quant_kernel(
 
         // Compute the block-wide max for thread0
         // cuda::maximum<>{}
-        int aggregate = BlockReduce(temp_storage).Reduce(local_amax, cub::Max{});
+        float aggregate = BlockReduce(temp_storage).Reduce(local_amax, cub::Max{});
 
         if (row_id == 0 && col_id == 0)
             s_block_amax = static_cast<float>(aggregate);
@@ -593,14 +593,14 @@ __global__ void sage_quant_kernel(
 
         // Compute the block-wide max for thread0
         // cuda::maximum<>{}
-        int aggregate = BlockReduce(temp_storage).Reduce(local_amax, cub::Max{});
+        float aggregate = BlockReduce(temp_storage).Reduce(local_amax, cub::Max{});
 
         if (row_id == 0 && col_id == 0)
             s_block_amax = static_cast<float>(aggregate);
 
         __syncthreads();
 
-        float block_scale = s_block_amax / 448 + 1e-6;
+        float block_scale = s_block_amax / 448 + 1e-4;
 
         int max_qblock_per_seq = (max_seq_len + BlockSizeK - 1) / BlockSizeK;
 
@@ -694,14 +694,14 @@ __global__ void sage_quant_kernel(
 
         // Compute the block-wide max for thread0
         // cuda::maximum<>{}
-        int aggregate = BlockReduce(temp_storage).Reduce(local_amax, cub::Max{});
+        float aggregate = BlockReduce(temp_storage).Reduce(local_amax, cub::Max{});
 
         if (row_id == 0 && col_id == 0)
             s_block_amax = static_cast<float>(aggregate);
 
         __syncthreads();
 
-        float block_scale = s_block_amax / 448 + 1e-6;
+        float block_scale = s_block_amax / 448 + 1e-4;
 
         int max_qblock_per_seq = (max_seq_len + BlockSizeV - 1) / BlockSizeV;
 

@@ -45,6 +45,9 @@ BertAttentionPlugin::BertAttentionPlugin(int num_heads, int head_size, float q_s
     , mMaxDistance(max_distance)
     , mRemovePadding(remove_padding)
 {
+    if (mFMHAForceFP32Acc){
+        std::cout<<"fp32 acc: "<<std::endl;
+    }
     // pre-check whether FMHA is supported in order to save memory allocation
     if (mEnableContextFMHA)
     {
@@ -213,7 +216,6 @@ int BertAttentionPlugin::enqueueImpl(nvinfer1::PluginTensorDesc const* inputDesc
     nvinfer1::PluginTensorDesc const* outputDesc, void const* const* inputs, void* const* outputs, void* workspace,
     cudaStream_t stream)
 {
-
     // inputs
     //     input_tensor [batch_size, seq_len, local_hidden_size*3] or [num_tokens, local_hidden_size*3]
     //     input_lengths [batch_size]
@@ -355,7 +357,7 @@ int BertAttentionPlugin::enqueueImpl(nvinfer1::PluginTensorDesc const* inputDesc
     if (mEnableContextFMHA)
     {
         // right now, this kernel only support 128 headsize
-        sage_quant<128, 64, 64, 256, __nv_bfloat16, __nv_fp8_e4m3, float>(
+        sage_quant<128, mQBlockSize, mKBlockSize, mVBlockSize, __nv_bfloat16, __nv_fp8_e4m3, float>(
         // host var
         batch_size, mNumHeads, input_seq_len, true,
         // device var
