@@ -18,7 +18,7 @@ from .attention import (Attention, AttentionMaskParams, AttentionMaskType,
                         CogVLMAttention, KeyValueCacheParams,
                         PositionEmbeddingType, SpecDecodingParams)
 from .cast import Cast
-from .conv import Conv1d, Conv2d, ConvTranspose2d
+from .conv import Conv1d, Conv2d, Conv3d, ConvTranspose2d
 from .embedding import Embedding, PromptTuningEmbedding
 from .linear import ColumnLinear, Linear, RowLinear
 from .lora import Lora, LoraParams, LoraRuntimeParams
@@ -44,6 +44,7 @@ __all__ = [
     'Embedding',
     'PromptTuningEmbedding',
     'Conv2d',
+    'Conv3d',
     'ConvTranspose2d',
     'Conv1d',
     'AvgPool2d',

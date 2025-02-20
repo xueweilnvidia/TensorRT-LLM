@@ -2059,7 +2059,8 @@ def select(input: Tensor, dim: int, index: Union[Tensor, int]) -> Tensor:
         index = constant(int32_array([index]))
     assert index.rank() == 1 and index.size(
         0) == 1, f"index should have rank 1, got {index.rank()}"
-
+    if dim < 0:
+        dim = input.ndim()+dim
     new_shape = []
     for i in range(input.rank()):
         if i != dim:
@@ -3475,6 +3476,45 @@ def conv2d(input: Tensor,
 
     return output
 
+def conv3d(input: Tensor,
+           weight: Tensor,
+           bias: Optional[Tensor] = None,
+           stride: Tuple[int, int, int] = (1, 1, 1),
+           padding: Tuple[int, int, int] = (0, 0, 0),
+           dilation: Tuple[int, int] = (1, 1, 1),
+           groups: int = 1) -> Tensor:
+    ##
+
+    ndim = input.ndim()
+
+    noutput = weight.size()[0]
+    kernel_size = (weight.size()[-3], weight.size()[-2], weight.size()[-1])
+
+    is_weight_constant = (weight.producer is not None
+                          and weight.producer.type == trt.LayerType.CONSTANT)
+    weight = weight.producer.weights if is_weight_constant else trt.Weights()
+
+    if bias is not None:
+        is_bias_constant = (bias.producer is not None
+                            and bias.producer.type == trt.LayerType.CONSTANT)
+        bias = bias.producer.weights if is_bias_constant else trt.Weights()
+
+    layer = default_trtnet().add_convolution_nd(input.trt_tensor, noutput,
+                                                kernel_size, weight, bias)
+    layer.stride_nd = stride
+    layer.padding_nd = padding
+    layer.dilation_nd = dilation
+    layer.num_groups = groups
+    layer.dilation_nd = dilation
+
+    if not is_weight_constant:
+        layer.set_input(1, weight.trt_tensor)
+    if bias is not None and not is_bias_constant:
+        layer.set_input(2, bias.trt_tensor)
+
+    output = _create_tensor(layer.get_output(0), layer)
+
+    return output
 
 def conv_transpose2d(input: Tensor,
                      weight: Tensor,
@@ -3526,6 +3566,41 @@ def conv_transpose2d(input: Tensor,
                     output.size(3)]))
 
     return output
+
+def dynamic_split(tensor: Tensor,
+          split_size_or_sections: Union[Tensor, Sequence[Tensor]],
+          dim: int = 0) -> Sequence[Tensor]:
+    '''
+    Returns:
+        The list of tensors produced by the different operations.
+    '''
+    ndim = tensor.ndim()
+    if dim < 0:
+        dim += ndim
+    dim_value = shape(tensor, dim)
+    starts = [constant(dims_array([0])) for _ in range(ndim)]
+    sizes = [shape(tensor, i) for i in range(ndim)]
+
+    if isinstance(split_size_or_sections, Tensor):
+        # TODO: support non-divisible cases
+        num_sections = dim_value // split_size_or_sections
+        sizes[dim] = split_size_or_sections
+
+        outputs = []
+        for i in range(num_sections):
+            starts[dim] = split_size_or_sections * i
+            outputs.append(slice(tensor, concat(starts), concat(sizes)))
+        return outputs
+    else:
+        num_sections = len(split_size_or_sections)
+
+        outputs = []
+        for i in range(num_sections):
+            if i > 0:
+                starts[dim] = starts[dim] + sizes[dim]
+            sizes[dim] = split_size_or_sections[i]
+            outputs.append(slice(tensor, concat(starts), concat(sizes)))
+        return outputs
 
 
 def split(tensor: Tensor,
@@ -3604,6 +3679,26 @@ def split(tensor: Tensor,
         return outputs
 
 
+def dynamic_chunk(tensor: Tensor, chunks: int, dim: int = 0) -> Tensor:
+    ndim = tensor.ndim()
+    if dim < 0:
+        dim += ndim
+    dim_value = shape(tensor, dim)
+
+    split_size_or_sections = dim_value // chunks
+    starts = [constant(dims_array([0])) for _ in range(ndim)]
+    sizes = [shape(tensor, i) for i in range(ndim)]
+
+    num_sections = chunks
+    sizes[dim] = split_size_or_sections
+
+    outputs = []
+    for i in range(num_sections):
+        starts[dim] = split_size_or_sections * i
+        outputs.append(slice(tensor, concat(starts), concat(sizes)))
+    return outputs
+
+
 def chunk(tensor: Tensor, chunks: int, dim: int = 0) -> Tensor:
     '''
     Add an operation that splits a tensor into sub-tensors.
@@ -3649,8 +3744,13 @@ def unbind(input: Tensor, dim: int = 0):
     Returns a tuple of all slices along a given dimension, already without it.
     '''
     ndim = input.ndim()
+    if dim < 0:
+        dim = ndim+dim
     outputs = split(input, 1, dim)
     output_shape = [input.shape[i] for i in range(ndim) if i != dim]
+    inferred_dim_list = [i for i in output_shape if i == -1]
+    if len(inferred_dim_list) > 1:
+        output_shape = concat([shape(input,i) for i in range(ndim) if i != dim])
     return [output.view(output_shape) for output in outputs]
 
 
