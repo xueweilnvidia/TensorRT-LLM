@@ -476,6 +476,7 @@ class PyExecutor:
                     f"timestamp = {formatted_timestamp}, "
                     f"num_scheduled_requests: {self.num_scheduled_requests}, "
                     f"states = {self.model_engine.iter_states}")
+                # raise Exception("hello")
 
             it += 1
 
@@ -792,6 +793,7 @@ class PyExecutor:
         torch.cuda.set_device(self.device_id)
         got_finish_signal = False
         num_dummy_request = 0
+        logger.info("here!")
         with self._profiler() as profile_step:
             iter_start_time = time.time()
             iter_stats = None
@@ -931,6 +933,7 @@ class PyExecutor:
             iter_stats = None
             while not got_finish_signal or len(self.active_requests) > 0:
                 profile_step()
+                logger.info("loop overlap")
                 if self.enable_iter_perf_stats:
                     iter_start_time = time.time()
                 new_requests = self._fetch_new_requests()

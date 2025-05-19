@@ -8,6 +8,8 @@ from tensorrt_llm.bench.build.build import build_command
 from tensorrt_llm.bench.dataclasses.general import BenchmarkEnvironment
 from tensorrt_llm.logger import logger, severity_map
 
+import os
+os.environ['TLLM_WORKER_USE_SINGLE_PROCESS']="1"
 
 @click.group(name="trtllm-bench", context_settings={'show_default': True})
 @click.option(

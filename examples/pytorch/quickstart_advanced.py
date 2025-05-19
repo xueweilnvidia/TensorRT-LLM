@@ -5,6 +5,9 @@ from tensorrt_llm._torch import LLM
 from tensorrt_llm._torch.pyexecutor.config import PyTorchConfig
 from tensorrt_llm.llmapi import (EagleDecodingConfig, KvCacheConfig,
                                  MTPDecodingConfig)
+import os
+os.environ['TLLM_WORKER_USE_SINGLE_PROCESS']="1"
+
 
 example_prompts = [
     "Hello, my name is",

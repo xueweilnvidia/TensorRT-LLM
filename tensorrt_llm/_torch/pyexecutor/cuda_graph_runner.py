@@ -6,6 +6,8 @@ import torch
 from ..attention_backend.interface import AttentionMetadata
 from ..speculative.interface import SpecMetadata
 from ..utils import make_weak_ref, set_piecewise_cuda_graph_flag
+from tensorrt_llm._utils import (is_trace_enabled, nvtx_range, release_gc,
+                                 torch_dtype_to_str, trace_func)
 
 _local = threading.local()
 
@@ -119,6 +121,7 @@ class DecodingCUDAGraphRunner:
     def needs_capture(self) -> bool:
         return self._output is None
 
+    @nvtx_range("cuda graph run")
     def run(
         self,
         inputs: Dict[str, Any],

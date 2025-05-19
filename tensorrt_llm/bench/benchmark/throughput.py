@@ -127,7 +127,7 @@ from tensorrt_llm.sampling_params import SamplingParams
 @optgroup.option(
     "--warmup",
     type=int,
-    default=2,
+    default=0,
     help="Number of requests warm up benchmark.",
 )
 @optgroup.option(
