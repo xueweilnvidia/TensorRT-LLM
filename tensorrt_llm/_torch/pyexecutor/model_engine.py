@@ -1966,6 +1966,7 @@ class PyTorchModelEngine(ModelEngine):
 
         # For simplicity, just return all the the logits if we have special gather_ids
         # from speculative decoding.
+        logger.info(f"input_id_length {inputs["input_ids"].shape[0]}")
         logits = self.model_forward(
             **inputs,
             return_context_logits=gather_ids is not None,

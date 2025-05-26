@@ -7,6 +7,7 @@ from ..attention_backend.interface import AttentionMetadata
 from ..pipeline_interface import PipelineInterface
 from ..speculative.interface import SpecMetadata
 from ..utils import make_weak_ref, set_piecewise_cuda_graph_flag
+from tensorrt_llm.logger import logger
 
 _local = threading.local()
 
@@ -135,7 +136,7 @@ class DecodingCUDAGraphRunner:
         assert "input_ids" in inputs
         assert "position_ids" in inputs
         assert "attn_metadata" in inputs
-
+        logger.info(f"input_id_length {inputs["input_ids"].shape[0]}")
         attn_metadata = inputs["attn_metadata"]
         assert attn_metadata is self.attn_metadata, (
             "attn_metadata does not match the attn_metadata instance that was used to "

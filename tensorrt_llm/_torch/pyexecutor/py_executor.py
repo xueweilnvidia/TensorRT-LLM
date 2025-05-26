@@ -1755,6 +1755,7 @@ class PyExecutor:
                                              new_tensors_device)
 
         try:
+            logger.info(f"[Executor] _forward_step: {len(scheduled_requests.context_requests)} ctx reqs, {len(scheduled_requests.generation_requests)} gen reqs")
             outputs = forward(scheduled_requests, self.resource_manager,
                               new_tensors_device)
             return outputs
