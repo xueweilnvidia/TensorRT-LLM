@@ -207,7 +207,7 @@ class ExecutorSettingsConfig(BaseModel):
     max_batch_size: int
     max_num_tokens: int
     kv_cache_percent: PositiveFloat = Field(default=.90, le=1.0)
-    kv_cache_reuse: bool = False
+    kv_cache_reuse: bool = True
     dynamic_max_batch_size: bool = True
     dynamic_max_num_tokens: bool = False  # Will enable after more validation.
 
@@ -222,7 +222,7 @@ class ExecutorSettingsConfig(BaseModel):
     def get_kvcache_config(self) -> KvCacheConfig:
         return KvCacheConfig(
             free_gpu_memory_fraction=self.kv_cache_percent,
-            enable_block_reuse=False,
+            enable_block_reuse=True,
         )
 
     def get_scheduler_config(self) -> SchedulerConfig:

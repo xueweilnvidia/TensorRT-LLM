@@ -136,7 +136,7 @@ class DecodingCUDAGraphRunner:
         assert "input_ids" in inputs
         assert "position_ids" in inputs
         assert "attn_metadata" in inputs
-        logger.info(f"input_id_length {inputs["input_ids"].shape[0]}")
+        logger.info(f"input_id_length_graph {inputs["input_ids"].shape[0]}")
         attn_metadata = inputs["attn_metadata"]
         assert attn_metadata is self.attn_metadata, (
             "attn_metadata does not match the attn_metadata instance that was used to "
