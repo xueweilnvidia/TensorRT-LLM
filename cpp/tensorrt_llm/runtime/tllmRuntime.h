@@ -92,6 +92,7 @@ public:
     void setOutputTensors(SizeType32 contextIndex, TensorMap& tensorMap);
 
     bool executeContext(SizeType32 contextIndex) const;
+    bool executeContextWithStream(SizeType32 contextIndex, cudaStream_t stream) const;
 
     CudaStream const& getStream() const;
 

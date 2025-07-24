@@ -259,7 +259,7 @@ void TllmRuntime::cacheTensorNames()
 nvinfer1::IExecutionContext& TllmRuntime::addContext(std::int32_t profileIndex)
 {
     TLLM_CHECK(0 <= profileIndex && profileIndex < mEngine->getNbOptimizationProfiles());
-    mContexts.emplace_back(mEngine->createExecutionContextWithoutDeviceMemory());
+    mContexts.emplace_back(mEngine->createExecutionContext());
     if (!mContexts.back())
     {
         if (mEngine->getStreamableWeightsSize() > 0)
@@ -272,7 +272,7 @@ nvinfer1::IExecutionContext& TllmRuntime::addContext(std::int32_t profileIndex)
         }
     }
     auto& context = *mContexts.back();
-    context.setDeviceMemoryV2(mEngineBuffer->data(), static_cast<int64_t>(mEngineBuffer->getCapacity()));
+    // context.setDeviceMemoryV2(mEngineBuffer->data(), static_cast<int64_t>(mEngineBuffer->getCapacity()));
 
     if (tensorrt_llm::common::Logger::getLogger()->isEnabled(tensorrt_llm::common::Logger::TRACE)
         && mContexts.size() == 1)
@@ -494,6 +494,15 @@ bool TllmRuntime::executeContext(SizeType32 contextIndex) const
     auto& context = getContext(contextIndex);
     auto res = context.enqueueV3(mStream->get());
     sync_check_cuda_error(mStream->get());
+    return res;
+}
+
+bool TllmRuntime::executeContextWithStream(SizeType32 contextIndex, cudaStream_t stream) const
+{
+    // NVTX3_FUNC_RANGE();
+    auto& context = getContext(contextIndex);
+    auto res = context.enqueueV3(stream);
+    sync_check_cuda_error(stream);
     return res;
 }
 

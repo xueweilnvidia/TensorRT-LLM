@@ -640,6 +640,7 @@ def main():
         build_config = BuildConfig.from_json_file(args.build_config,
                                                   plugin_config=plugin_config)
 
+    build_config.update_from_dict({'kv_cache_type': KVCacheType.DISABLED})
     parallel_build(model_config, ckpt_dir, build_config, args.output_dir,
                    workers, args.log_level, model_cls, **kwargs)
 
