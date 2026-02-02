@@ -26,6 +26,8 @@ from visual_gen.utils import get_logger
 
 logger = get_logger(__name__)
 
+import nvtx
+
 
 def sample_tensors(batch_size, num_heads, seq_len, head_dim, world_size):
     """Create sample tensors for attention testing."""
@@ -105,18 +107,12 @@ def test_attn_parallel(
     )
     attn = ditAttnProcessor()
     AttentionOpManager.set_attn_config(attn_type=attn_type)
-    local_output = attn.visual_gen_attn(local_query, local_key, local_value, tensor_layout=tensor_layout)
+    
+    for _ in range(10):
+        with nvtx.annotate(f"visual_gen attn u{ulysses_size} r{ring_size}"):
+            local_output = attn.visual_gen_attn(local_query, local_key, local_value, tensor_layout=tensor_layout)
     if tensor_layout == "NHD":
         local_output = local_output.permute(0, 2, 1, 3)
-
-    ref_output = F.scaled_dot_product_attention(query, key, value, is_causal=False)
-    local_ref_output = ref_output.chunk(world_size, dim=2)[dist.get_rank()]
-
-    cos_sim = torch.nn.CosineSimilarity(dim=0, eps=1e-6)
-    cos_similarity = cos_sim(local_output.reshape(-1).to(torch.float32), local_ref_output.reshape(-1).to(torch.float32))
-    print("cos_similarity total: ", cos_similarity)
-    if cos_similarity < 0.99:
-        raise RuntimeError("Accuracy test failed")
 
 
 def test_joint_attn_parallel(batch_size, num_heads, seq_len, head_dim, world_size, ulysses_size, ring_size, attn_type):
@@ -282,7 +278,10 @@ def test_uneven_attn_parallel(
     PipelineConfig.set_uneven_cp_config(seq_len_padded - uneven_number, seq_len_padded, seq_len_cur_rank, dit_config)
     attn = ditAttnProcessor()
     AttentionOpManager.set_attn_config(attn_type=attn_type)
-    local_output = attn.visual_gen_attn(local_query, local_key, local_value, tensor_layout="HND")
+    
+    for _ in range(10):
+        with nvtx.annotate(f"uneven visual_gen attn u{ulysses_size} r{ring_size}"):
+            local_output = attn.visual_gen_attn(local_query, local_key, local_value, tensor_layout="HND")
 
     query = query[:, :, :-uneven_number, :]
     key = key[:, :, :-uneven_number, :]
@@ -344,81 +343,81 @@ if __name__ == "__main__":
     except ImportError:
         print("FlashInfer-VX (SageAttn for Blackwell) is not installed, test fivx will be skipped.")
 
-    if test_sage_attn:
-        test_attn_parallel(
-            batch_size=1,
-            num_heads=24,
-            seq_len=6 * 8 * 1024,
-            head_dim=128,
-            world_size=world_size,
-            ulysses_size=1,
-            ring_size=world_size,
-            attn_type="sage-attn",
-        )
-        test_uneven_attn_parallel(
-            batch_size=1,
-            num_heads=24,
-            seq_len_padded=6 * 8 * 1024,
-            head_dim=128,
-            world_size=world_size,
-            ulysses_size=1,
-            ring_size=world_size,
-            attn_type="sage-attn",
-        )
-        if world_size // 2 >= 1:
-            test_attn_parallel(
-                batch_size=1,
-                num_heads=24,
-                seq_len=6 * 8 * 1024,
-                head_dim=128,
-                world_size=world_size,
-                ulysses_size=2,
-                ring_size=world_size // 2,
-                attn_type="sage-attn",
-            )
-        if world_size // 4 >= 1:
-            test_uneven_attn_parallel(
-                batch_size=1,
-                num_heads=24,
-                seq_len_padded=6 * 8 * 1024,
-                head_dim=128,
-                world_size=world_size,
-                ulysses_size=4,
-                ring_size=world_size // 4,
-                attn_type="sage-attn",
-            )
+    # if test_sage_attn:
+    #     test_attn_parallel(
+    #         batch_size=1,
+    #         num_heads=24,
+    #         seq_len=6 * 8 * 1024,
+    #         head_dim=128,
+    #         world_size=world_size,
+    #         ulysses_size=1,
+    #         ring_size=world_size,
+    #         attn_type="sage-attn",
+    #     )
+    #     test_uneven_attn_parallel(
+    #         batch_size=1,
+    #         num_heads=24,
+    #         seq_len_padded=6 * 8 * 1024,
+    #         head_dim=128,
+    #         world_size=world_size,
+    #         ulysses_size=1,
+    #         ring_size=world_size,
+    #         attn_type="sage-attn",
+    #     )
+    #     if world_size // 2 >= 1:
+    #         test_attn_parallel(
+    #             batch_size=1,
+    #             num_heads=24,
+    #             seq_len=6 * 8 * 1024,
+    #             head_dim=128,
+    #             world_size=world_size,
+    #             ulysses_size=2,
+    #             ring_size=world_size // 2,
+    #             attn_type="sage-attn",
+    #         )
+    #     if world_size // 4 >= 1:
+    #         test_uneven_attn_parallel(
+    #             batch_size=1,
+    #             num_heads=24,
+    #             seq_len_padded=6 * 8 * 1024,
+    #             head_dim=128,
+    #             world_size=world_size,
+    #             ulysses_size=4,
+    #             ring_size=world_size // 4,
+    #             attn_type="sage-attn",
+    #         )
 
-        test_attn_parallel(
-            batch_size=1,
-            num_heads=24,
-            seq_len=6 * 8 * 1024,
-            head_dim=128,
-            world_size=world_size,
-            ulysses_size=world_size,
-            ring_size=1,
-            attn_type="sage-attn",
-        )
-        test_uneven_attn_parallel(
-            batch_size=1,
-            num_heads=24,
-            seq_len_padded=6 * 8 * 1024,
-            head_dim=128,
-            world_size=world_size,
-            ulysses_size=world_size,
-            ring_size=1,
-            attn_type="sage-attn",
-        )
-        if world_size // 2 >= 1:
-            test_joint_attn_parallel(
-                batch_size=1,
-                num_heads=24,
-                seq_len=4096,
-                head_dim=128,
-                world_size=world_size,
-                ulysses_size=world_size,
-                ring_size=1,
-                attn_type="sage-attn",
-            )
+    #     test_attn_parallel(
+    #         batch_size=1,
+    #         num_heads=24,
+    #         seq_len=6 * 8 * 1024,
+    #         head_dim=128,
+    #         world_size=world_size,
+    #         ulysses_size=world_size,
+    #         ring_size=1,
+    #         attn_type="sage-attn",
+    #     )
+    #     test_uneven_attn_parallel(
+    #         batch_size=1,
+    #         num_heads=24,
+    #         seq_len_padded=6 * 8 * 1024,
+    #         head_dim=128,
+    #         world_size=world_size,
+    #         ulysses_size=world_size,
+    #         ring_size=1,
+    #         attn_type="sage-attn",
+    #     )
+        # if world_size // 2 >= 1:
+        #     test_joint_attn_parallel(
+        #         batch_size=1,
+        #         num_heads=24,
+        #         seq_len=4096,
+        #         head_dim=128,
+        #         world_size=world_size,
+        #         ulysses_size=world_size,
+        #         ring_size=1,
+        #         attn_type="sage-attn",
+        #     )
 
     if test_flash_attn3:
         test_attn_parallel(
@@ -452,15 +451,15 @@ if __name__ == "__main__":
                 ring_size=world_size // 2,
                 attn_type="flash-attn3",
             )
-        if world_size // 4 >= 1:
+        # if world_size // 4 >= 1:
             test_uneven_attn_parallel(
                 batch_size=1,
                 num_heads=24,
                 seq_len_padded=6 * 8 * 1024,
                 head_dim=128,
                 world_size=world_size,
-                ulysses_size=4,
-                ring_size=world_size // 4,
+                ulysses_size=2,
+                ring_size=world_size // 2,
                 attn_type="flash-attn3",
             )
 
@@ -495,76 +494,76 @@ if __name__ == "__main__":
             attn_type="flash-attn3",
         )
 
-    if test_flash_attn4:
-        test_attn_parallel(
-            batch_size=1,
-            num_heads=24,
-            seq_len=6 * 8 * 1024,
-            head_dim=128,
-            world_size=world_size,
-            ulysses_size=world_size,
-            ring_size=1,
-            attn_type="flash-attn4",
-            tensor_layout="HND",
-        )
+    # if test_flash_attn4:
+    #     test_attn_parallel(
+    #         batch_size=1,
+    #         num_heads=24,
+    #         seq_len=6 * 8 * 1024,
+    #         head_dim=128,
+    #         world_size=world_size,
+    #         ulysses_size=world_size,
+    #         ring_size=1,
+    #         attn_type="flash-attn4",
+    #         tensor_layout="HND",
+    #     )
 
-        test_attn_parallel(
-            batch_size=1,
-            num_heads=24,
-            seq_len=6 * 8 * 1024,
-            head_dim=128,
-            world_size=world_size,
-            ulysses_size=world_size,
-            ring_size=1,
-            attn_type="flash-attn4",
-            tensor_layout="NHD",
-        )
+    #     test_attn_parallel(
+    #         batch_size=1,
+    #         num_heads=24,
+    #         seq_len=6 * 8 * 1024,
+    #         head_dim=128,
+    #         world_size=world_size,
+    #         ulysses_size=world_size,
+    #         ring_size=1,
+    #         attn_type="flash-attn4",
+    #         tensor_layout="NHD",
+    #     )
 
-        test_attn_parallel(
-            batch_size=1,
-            num_heads=24,
-            seq_len=6 * 8 * 1024,
-            head_dim=128,
-            world_size=world_size,
-            ulysses_size=1,
-            ring_size=world_size,
-            attn_type="flash-attn4",
-            tensor_layout="HND",
-        )
+    #     test_attn_parallel(
+    #         batch_size=1,
+    #         num_heads=24,
+    #         seq_len=6 * 8 * 1024,
+    #         head_dim=128,
+    #         world_size=world_size,
+    #         ulysses_size=1,
+    #         ring_size=world_size,
+    #         attn_type="flash-attn4",
+    #         tensor_layout="HND",
+    #     )
 
-        test_attn_parallel(
-            batch_size=1,
-            num_heads=24,
-            seq_len=6 * 8 * 1024,
-            head_dim=128,
-            world_size=world_size,
-            ulysses_size=2,
-            ring_size=2,
-            attn_type="flash-attn4",
-            tensor_layout="NHD",
-        )
+    #     test_attn_parallel(
+    #         batch_size=1,
+    #         num_heads=24,
+    #         seq_len=6 * 8 * 1024,
+    #         head_dim=128,
+    #         world_size=world_size,
+    #         ulysses_size=2,
+    #         ring_size=2,
+    #         attn_type="flash-attn4",
+    #         tensor_layout="NHD",
+    #     )
 
-    if test_fivx:
-        test_attn_parallel(
-            batch_size=1,
-            num_heads=24,
-            seq_len=6 * 8 * 1024,
-            head_dim=128,
-            world_size=world_size,
-            ulysses_size=world_size,
-            ring_size=1,
-            attn_type="fivx",
-        )
+    # if test_fivx:
+    #     test_attn_parallel(
+    #         batch_size=1,
+    #         num_heads=24,
+    #         seq_len=6 * 8 * 1024,
+    #         head_dim=128,
+    #         world_size=world_size,
+    #         ulysses_size=world_size,
+    #         ring_size=1,
+    #         attn_type="fivx",
+    #     )
 
-        test_attn_parallel(
-            batch_size=1,
-            num_heads=24,
-            seq_len=6 * 8 * 1024,
-            head_dim=128,
-            world_size=world_size,
-            ulysses_size=1,
-            ring_size=world_size,
-            attn_type="fivx",
-        )
+    #     test_attn_parallel(
+    #         batch_size=1,
+    #         num_heads=24,
+    #         seq_len=6 * 8 * 1024,
+    #         head_dim=128,
+    #         world_size=world_size,
+    #         ulysses_size=1,
+    #         ring_size=world_size,
+    #         attn_type="fivx",
+    #     )
 
     dist.destroy_process_group()

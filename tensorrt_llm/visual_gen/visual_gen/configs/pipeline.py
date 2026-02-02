@@ -118,8 +118,9 @@ class PipelineConfig:
 
         cls.seq_len_cur_ring_group = cls.seq_len_all_ranks[torch.tensor(ditParallelConfig.ring_ranks())]
         seq_len_cur_ulysses_group = cls.seq_len_all_ranks[torch.tensor(ditParallelConfig.ulysses_ranks())]
-        ulysses_seq_cur_ring_rank = torch.sum(seq_len_cur_ulysses_group, dtype=torch.int32)
+        ulysses_seq_cur_ring_rank = torch.sum(seq_len_cur_ulysses_group, dtype=torch.int32).to(device)
         gather_list = [torch.empty(1, dtype=torch.int32, device=device) for _ in range(ditParallelConfig.ring_size())]
+        # print(f"ulysses_seq_cur_ring_rank: {ulysses_seq_cur_ring_rank}")
         torch.distributed.all_gather(gather_list, ulysses_seq_cur_ring_rank, group=ditParallelConfig.ring_group())
         cls.ulysses_seq_all_ring_ranks = torch.cat(gather_list, dim=0)
 
