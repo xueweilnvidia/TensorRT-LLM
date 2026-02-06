@@ -134,7 +134,6 @@ def ulysses_a2a_in(
     value,
     attn_mask,
     tensor_layout,
-    only_split_query=False,
     ulysses_size=1,
     ulysses_rank=0,
     ulysses_group=None,
@@ -157,19 +156,7 @@ def ulysses_a2a_in(
         raise ValueError(f"Invalid tensor layout: {tensor_layout}")
 
     # [B, H, S/N, D] -> [B, H/N, S, D]
-    if only_split_query:
-        # Only query needs all-to-all, k/v just get chunked locally
-        query = all_to_all(
-            query,
-            scatter_idx=scatter_idx,
-            gather_idx=gather_idx,
-            group=ulysses_group,
-            tensor_layout=tensor_layout,
-            int8_comm=int8_all2all,
-        )
-        key = torch.chunk(key, ulysses_size, dim=scatter_idx)[ulysses_rank]
-        value = torch.chunk(value, ulysses_size, dim=scatter_idx)[ulysses_rank]
-    elif fuse_qkv:
+    if fuse_qkv:
         # Fused communication: concatenate q/k/v into [3*B, H, S/N, D], single all-to-all, then split
         # This reduces 3 NCCL calls to 1, improving efficiency
         qkv = torch.cat([query, key, value], dim=0)
@@ -277,7 +264,6 @@ def ring_attn_p2p_communicate(rank, send_tensor, send_dst, recv_tensor, recv_src
 def ulysses_wrapper(func):
     # @torch.cuda.nvtx.range("ditAttn.ulysses_wrapper")
     def wrapper(self, query, key, value, tensor_layout, attn_mask=None, **kwargs):
-        only_split_query = kwargs.pop("only_split_query", False)
         # if ulysses_size == 1, no need to do ulysses_a2a_in and ulysses_a2a_out
         if get_dit_parallel_config().ulysses_size() == 1:
             return func(self, query, key, value, tensor_layout, attn_mask, **kwargs)
@@ -309,49 +295,6 @@ def ulysses_wrapper(func):
                 f"Head dim {head_dim} of value {value.shape} must be divisible by ulysses size {ulysses_size}"
             )
 
-        joint_seq_length = kwargs.get("joint_seq_length", 0)
-        if joint_seq_length > 0:
-            if ring_size == 1:
-                joint_strategy = kwargs.get("joint_strategy", "none")
-                assert joint_strategy != "none", "joint_strategy can not be none when joint_seq_length > 0"
-                if joint_strategy == "rear":
-                    joint_query = torch.narrow(
-                        query, seq_dim, query.shape[seq_dim] - joint_seq_length, joint_seq_length
-                    ).contiguous()
-                    joint_key = torch.narrow(
-                        key, seq_dim, key.shape[seq_dim] - joint_seq_length, joint_seq_length
-                    ).contiguous()
-                    joint_value = torch.narrow(
-                        value, seq_dim, value.shape[seq_dim] - joint_seq_length, joint_seq_length
-                    ).contiguous()
-                    query = torch.narrow(query, seq_dim, 0, query.shape[seq_dim] - joint_seq_length).contiguous()
-                    key = torch.narrow(key, seq_dim, 0, key.shape[seq_dim] - joint_seq_length).contiguous()
-                    value = torch.narrow(value, seq_dim, 0, value.shape[seq_dim] - joint_seq_length).contiguous()
-                else:
-                    joint_query = torch.narrow(query, seq_dim, 0, joint_seq_length).contiguous()
-                    joint_key = torch.narrow(key, seq_dim, 0, joint_seq_length).contiguous()
-                    joint_value = torch.narrow(value, seq_dim, 0, joint_seq_length).contiguous()
-                    query = torch.narrow(
-                        query, seq_dim, joint_seq_length, query.shape[seq_dim] - joint_seq_length
-                    ).contiguous()
-                    key = torch.narrow(
-                        key, seq_dim, joint_seq_length, key.shape[seq_dim] - joint_seq_length
-                    ).contiguous()
-                    value = torch.narrow(
-                        value, seq_dim, joint_seq_length, value.shape[seq_dim] - joint_seq_length
-                    ).contiguous()
-                # split joint query, key and value along head dimension to follow the same logic as query, key and value.
-                joint_query = torch.chunk(joint_query, ulysses_size, dim=head_dim)[ulysses_rank]
-                joint_key = torch.chunk(joint_key, ulysses_size, dim=head_dim)[ulysses_rank]
-                joint_value = torch.chunk(joint_value, ulysses_size, dim=head_dim)[ulysses_rank]
-            else:
-                # k/v don't have joint part if ring attn is enabled. The joint part is handled by ring attn.
-                joint_query = torch.narrow(
-                    query, seq_dim, query.shape[seq_dim] - joint_seq_length, joint_seq_length
-                ).contiguous()
-                joint_query = torch.chunk(joint_query, ulysses_size, dim=head_dim)[ulysses_rank]
-                query = torch.narrow(query, seq_dim, 0, query.shape[seq_dim] - joint_seq_length).contiguous()
-
         # Apply ulysses_a2a_in before the function call
         int8_all2all = PipelineConfig.int8_ulysses
         fuse_qkv = PipelineConfig.fuse_qkv_in_ulysses
@@ -361,7 +304,6 @@ def ulysses_wrapper(func):
             value,
             attn_mask,
             tensor_layout,
-            only_split_query=only_split_query,
             ulysses_size=ulysses_size,
             ulysses_rank=ulysses_rank,
             ulysses_group=ulysses_group,
@@ -373,9 +315,6 @@ def ulysses_wrapper(func):
         truncate_and_pad = PipelineConfig.seq_len_all_ranks is not None
 
         if truncate_and_pad:
-            assert (
-                joint_seq_length == 0
-            ), "joint_seq_length > 0 is not supported by ulysses wrapper when truncate_and_pad is True"
             if ring_size == 1:
                 # there is no ring, so we can use PipelineConfig.seq_len to do truncate and pad
                 seq_len = PipelineConfig.ulysses_seq_all_ring_ranks[0]
@@ -394,52 +333,9 @@ def ulysses_wrapper(func):
                 kwargs.pop("q_seq_len")
                 kwargs.pop("kv_seq_len")
 
-        if joint_seq_length > 0:
-            if ring_size == 1 and cp_size == 1:
-                if joint_strategy == "rear":
-                    query = torch.cat((query, joint_query), dim=seq_dim)
-                    key = torch.cat((key, joint_key), dim=seq_dim)
-                    value = torch.cat((value, joint_value), dim=seq_dim)
-                else:
-                    query = torch.cat((joint_query, query), dim=seq_dim)
-                    key = torch.cat((joint_key, key), dim=seq_dim)
-                    value = torch.cat((joint_value, value), dim=seq_dim)
-            else:
-                raise NotImplementedError("joint_seq_length > 0 is not supported when ring size > 1 or cp size > 1")
-
         # Call the original function
         result = func(self, query, key, value, tensor_layout, attn_mask, **kwargs)
         if ring_size == 1:
-            if joint_seq_length > 0:
-                if joint_strategy == "rear":
-                    joint_result = torch.narrow(
-                        result, seq_dim, result.shape[seq_dim] - joint_seq_length, joint_seq_length
-                    ).contiguous()
-                    result = torch.narrow(result, seq_dim, 0, result.shape[seq_dim] - joint_seq_length).contiguous()
-                else:
-                    joint_result = torch.narrow(result, seq_dim, 0, joint_seq_length).contiguous()
-                    result = torch.narrow(
-                        result, seq_dim, joint_seq_length, result.shape[seq_dim] - joint_seq_length
-                    ).contiguous()
-
-                joint_result_gathered = torch.empty(
-                    ulysses_size, *joint_result.shape, device=joint_result.device, dtype=joint_result.dtype
-                )
-                work = torch.distributed.all_gather_into_tensor(
-                    joint_result_gathered, joint_result, group=ulysses_group, async_op=True
-                )
-                work.wait()
-                if tensor_layout == "HND":
-                    # [ulysses_size, B, H, S, D] -> [B, ulysses_size * H, S, D]
-                    _, B, H, S, D = joint_result_gathered.shape
-                    joint_result = joint_result_gathered.permute(1, 0, 2, 3, 4).reshape(B, ulysses_size * H, S, D)
-                elif tensor_layout == "NHD":
-                    # [ulysses_size, B, S, H, D] -> [B, S, ulysses_size * H, D]
-                    _, B, S, H, D = joint_result_gathered.shape
-                    joint_result = joint_result_gathered.permute(1, 2, 0, 3, 4).reshape(B, S, ulysses_size * H, D)
-                else:
-                    raise ValueError(f"Invalid tensor layout: {tensor_layout}")
-
             # if ring size is 1, return_lse is false, result only has output.
             if truncate_and_pad:
                 # Zero out padding using torch.narrow
@@ -449,11 +345,7 @@ def ulysses_wrapper(func):
             result = ulysses_a2a_out(
                 result, tensor_layout, ulysses_size=ulysses_size, ulysses_group=ulysses_group, int8_all2all=int8_all2all
             )
-            if joint_seq_length > 0:
-                if joint_strategy == "rear":
-                    result = torch.cat((result, joint_result), dim=seq_dim)
-                else:
-                    result = torch.cat((joint_result, result), dim=seq_dim)
+
             return result
         else:
             # if ring size is not 1, return_lse is true, result has output and softmax_lse.
@@ -514,8 +406,6 @@ def ring_wrapper(func):
         if cu_seqlens_q is not None:
             raise NotImplementedError("var_len_attention is not supported by ring wrapper")
 
-        joint_seq_length = kwargs.get("joint_seq_length", 0)
-        valid_joint_seq_length = kwargs.get("valid_joint_seq_length", None)
 
         rank = get_dit_parallel_config().ring_rank()
         send_dst = (rank + 1) % ring_size
@@ -529,29 +419,6 @@ def ring_wrapper(func):
         else:
             # Default to dimension 3 for backward compatibility
             seq_dim = 2
-
-        if joint_seq_length > 0:
-            # Joint sequence will be handled outside ring attn
-            kwargs["joint_seq_length"] = 0
-            kwargs["valid_joint_seq_length"] = None
-            joint_strategy = kwargs.get("joint_strategy", "none")
-            assert joint_strategy != "none", "joint_strategy can not be none when joint_seq_length > 0"
-            if joint_strategy == "rear":
-                joint_key = torch.narrow(
-                    key, seq_dim, key.shape[seq_dim] - joint_seq_length, joint_seq_length
-                ).contiguous()
-                joint_value = torch.narrow(
-                    value, seq_dim, value.shape[seq_dim] - joint_seq_length, joint_seq_length
-                ).contiguous()
-                key = torch.narrow(key, seq_dim, 0, key.shape[seq_dim] - joint_seq_length).contiguous()
-                value = torch.narrow(value, seq_dim, 0, value.shape[seq_dim] - joint_seq_length).contiguous()
-            else:
-                joint_key = torch.narrow(key, seq_dim, 0, joint_seq_length).contiguous()
-                joint_value = torch.narrow(value, seq_dim, 0, joint_seq_length).contiguous()
-                key = torch.narrow(key, seq_dim, joint_seq_length, key.shape[seq_dim] - joint_seq_length).contiguous()
-                value = torch.narrow(
-                    value, seq_dim, joint_seq_length, value.shape[seq_dim] - joint_seq_length
-                ).contiguous()
 
         p2p_comm_buffers = [None, None]
         p2p_comm_buffers[0] = torch.cat((key.unsqueeze(0), value.unsqueeze(0)), dim=0)
@@ -602,15 +469,6 @@ def ring_wrapper(func):
                 ring_fwd_out_correction(out, out_per_step, softmax_lse, softmax_lse_per_step)
                 ring_fwd_softmax_lse_correction(softmax_lse, softmax_lse_per_step)
 
-        if joint_seq_length > 0:
-            kwargs["joint_seq_length"] = joint_seq_length
-            kwargs["valid_joint_seq_length"] = valid_joint_seq_length
-            kwargs["only_split_query"] = (
-                True  # joint key and joint value are not splited by sequence parallel, so only split query.
-            )
-            block_out = func(self, query, joint_key, joint_value, tensor_layout, attn_mask, **kwargs)
-            ring_fwd_out_correction(out, block_out[0], softmax_lse, block_out[1])
-            ring_fwd_softmax_lse_correction(softmax_lse, block_out[1])
 
         # Determine output sequence dimension based on tensor layout (for output tensor)
         if tensor_layout == "HND":
