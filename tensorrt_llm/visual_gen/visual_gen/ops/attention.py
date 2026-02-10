@@ -88,26 +88,26 @@ class BaseAttn:
 
     def _convert_qkv_layout(self, q, k, v, src_layout, dst_layout):
         if src_layout == "HND" and dst_layout == "NHD":
-            # [B, H, S, D] -> [B, S, H, D]
-            q = q.permute(0, 2, 1, 3).contiguous()
-            k = k.permute(0, 2, 1, 3).contiguous()
-            v = v.permute(0, 2, 1, 3).contiguous()
+            # [H, S, D] -> [S, H, D]
+            q = q.permute(1, 0, 2).contiguous()
+            k = k.permute(1, 0, 2).contiguous()
+            v = v.permute(1, 0, 2).contiguous()
         elif src_layout == "NHD" and dst_layout == "HND":
-            # [B, S, H, D] -> [B, H, S, D]
-            q = q.permute(0, 2, 1, 3).contiguous()
-            k = k.permute(0, 2, 1, 3).contiguous()
-            v = v.permute(0, 2, 1, 3).contiguous()
+            # [S, H, D] -> [H, S, D]
+            q = q.permute(1, 0, 2).contiguous()
+            k = k.permute(1, 0, 2).contiguous()
+            v = v.permute(1, 0, 2).contiguous()
         else:
             raise NotImplementedError(f"Unsupported tensor layout conversion: {src_layout} -> {dst_layout}")
         return q, k, v
 
     def _convert_output_layout(self, out, src_layout, dst_layout):
         if src_layout == "HND" and dst_layout == "NHD":
-            # [B, S, H, D] -> [B, H, S, D]
-            out = out.permute(0, 2, 1, 3).contiguous()
+            # [S, H, D] -> [H, S, D]
+            out = out.permute(1, 0, 2).contiguous()
         elif src_layout == "NHD" and dst_layout == "HND":
-            # [B, H, S, D] -> [B, S, H, D]
-            out = out.permute(0, 2, 1, 3).contiguous()
+            # [H, S, D] -> [S, H, D]
+            out = out.permute(1, 0, 2).contiguous()
         else:
             raise NotImplementedError(f"Unsupported tensor layout conversion: {src_layout} -> {dst_layout}")
         return out
@@ -687,6 +687,9 @@ class FlashAttn3(BaseAttn):
             value = value.to(torch.float16)
 
         if cu_seqlens_q is None:
+            query = torch.unsqueeze(query, dim=0)
+            key = torch.unsqueeze(key, dim=0)
+            value = torch.unsqueeze(value, dim=0)
             output = flash_attn_interface.flash_attn_func(
                 q=query,
                 k=key,
@@ -706,10 +709,15 @@ class FlashAttn3(BaseAttn):
                 sm_margin=0,
                 return_attn_probs=return_lse,
             )
+
+            if isinstance(output, tuple):
+                lse = torch.squeeze(output[1], dim=0)
+                output = torch.squeeze(output[0], dim=0)
+                output = (output, lse)
+            else:
+                output = torch.squeeze(output, dim=0)
+
         else:
-            query = torch.squeeze(query, dim=0)    
-            key = torch.squeeze(key, dim=0)
-            value = torch.squeeze(value, dim=0)
             output = flash_attn_interface.flash_attn_varlen_func(
                 q=query,
                 k=key,
@@ -733,7 +741,6 @@ class FlashAttn3(BaseAttn):
                 sm_margin=0,
                 return_attn_probs=False,
             )
-            output = torch.unsqueeze(output, dim=0)
 
         lse = None
         if isinstance(output, tuple):

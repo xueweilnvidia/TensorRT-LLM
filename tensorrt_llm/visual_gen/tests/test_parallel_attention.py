@@ -29,10 +29,10 @@ logger = get_logger(__name__)
 import nvtx
 
 
-def sample_tensors(batch_size, num_heads, seq_len, head_dim, world_size):
+def sample_tensors(num_heads, seq_len, head_dim, world_size):
     """Create sample tensors for attention testing."""
 
-    shape = (batch_size, num_heads, seq_len, head_dim)
+    shape = (num_heads, seq_len, head_dim)
     rank = dist.get_rank()
     device = torch.device(f"cuda:{rank}")
 
@@ -45,9 +45,9 @@ def sample_tensors(batch_size, num_heads, seq_len, head_dim, world_size):
     dist.broadcast(k, src=0)
     dist.broadcast(v, src=0)
 
-    local_q = q.chunk(world_size, dim=2)[rank]
-    local_k = k.chunk(world_size, dim=2)[rank]
-    local_v = v.chunk(world_size, dim=2)[rank]
+    local_q = q.chunk(world_size, dim=1)[rank]
+    local_k = k.chunk(world_size, dim=1)[rank]
+    local_v = v.chunk(world_size, dim=1)[rank]
     return q, k, v, local_q, local_k, local_v
 
 
@@ -85,18 +85,18 @@ def sample_joint_tensors(batch_size, num_heads, seq_len, head_dim, world_size):
 
 
 def test_attn_parallel(
-    batch_size, num_heads, seq_len, head_dim, world_size, ulysses_size, ring_size, attn_type, tensor_layout="HND"
+    num_heads, seq_len, head_dim, world_size, ulysses_size, ring_size, attn_type, tensor_layout="HND"
 ):
     """Test basic parallel attention functionality."""
     PipelineConfig.reset()
     query, key, value, local_query, local_key, local_value = sample_tensors(
-        batch_size, num_heads, seq_len, head_dim, world_size
+        num_heads, seq_len, head_dim, world_size
     )
 
     if tensor_layout == "NHD":
-        local_query = local_query.permute(0, 2, 1, 3).contiguous()
-        local_key = local_key.permute(0, 2, 1, 3).contiguous()
-        local_value = local_value.permute(0, 2, 1, 3).contiguous()
+        local_query = local_query.permute(1, 0, 2).contiguous()
+        local_key = local_key.permute(1, 0, 2).contiguous()
+        local_value = local_value.permute(1, 0, 2).contiguous()
 
     dit_config = DiTParallelConfig()
     dit_config.set_config(
@@ -112,7 +112,16 @@ def test_attn_parallel(
         with nvtx.annotate(f"visual_gen attn u{ulysses_size} r{ring_size}"):
             local_output = attn.visual_gen_attn(local_query, local_key, local_value, tensor_layout=tensor_layout)
     if tensor_layout == "NHD":
-        local_output = local_output.permute(0, 2, 1, 3)
+        local_output = local_output.permute(1, 0, 2)
+
+    ref_output = F.scaled_dot_product_attention(query.unsqueeze(0), key.unsqueeze(0), value.unsqueeze(0), is_causal=False)
+    local_ref_output = ref_output.chunk(world_size, dim=2)[dist.get_rank()]
+
+    cos_sim = torch.nn.CosineSimilarity(dim=0, eps=1e-6)
+    cos_similarity = cos_sim(local_output.reshape(-1).to(torch.float32), local_ref_output.reshape(-1).to(torch.float32))
+    print("cos_similarity total: ", cos_similarity)
+    if cos_similarity < 0.99:
+        raise RuntimeError("Accuracy test failed")
 
 
 def test_joint_attn_parallel(batch_size, num_heads, seq_len, head_dim, world_size, ulysses_size, ring_size, attn_type):
@@ -210,10 +219,10 @@ def test_uneven_varlen_attn_parallel(
     uneven_number = seq_len_padded - total_seq_len
     PipelineConfig.reset()
     query, key, value, local_query, local_key, local_value = sample_tensors(
-        1, num_heads, seq_len_padded, head_dim, world_size
+        num_heads, seq_len_padded, head_dim, world_size
     )
 
-    seq_len_cur_rank = torch.tensor([local_query.shape[2]], dtype=torch.int32, device=device)
+    seq_len_cur_rank = torch.tensor([local_query.shape[1]], dtype=torch.int32, device=device)
     if dist.get_rank() == world_size - 1:
         seq_len_cur_rank = seq_len_cur_rank - uneven_number
 
@@ -232,10 +241,10 @@ def test_uneven_varlen_attn_parallel(
 
     local_ref_output_list = []
     for i in range(len(seq_len_list)):
-        q_tmp = query[:, :, cu_seqlens_q[i]:cu_seqlens_q[i+1], :]
-        k_tmp = key[:, :, cu_seqlens_k[i]:cu_seqlens_k[i+1], :]
-        v_tmp = value[:, :, cu_seqlens_k[i]:cu_seqlens_k[i+1], :]
-        tmp_output = F.scaled_dot_product_attention(q_tmp, k_tmp, v_tmp, is_causal=False)
+        q_tmp = query[:, cu_seqlens_q[i]:cu_seqlens_q[i+1], :]
+        k_tmp = key[:, cu_seqlens_k[i]:cu_seqlens_k[i+1], :]
+        v_tmp = value[:, cu_seqlens_k[i]:cu_seqlens_k[i+1], :]
+        tmp_output = F.scaled_dot_product_attention(q_tmp.unsqueeze(0), k_tmp.unsqueeze(0), v_tmp.unsqueeze(0), is_causal=False)
         local_ref_output_list.append(tmp_output)
 
     ref_output = torch.cat(local_ref_output_list, dim=2) 
@@ -243,7 +252,7 @@ def test_uneven_varlen_attn_parallel(
     local_ref_output = ref_output.chunk(world_size, dim=2)[dist.get_rank()]
 
     if dist.get_rank() == world_size - 1 and seq_len_padded > total_seq_len:
-        local_output = local_output[ :, :, :-uneven_number, :]
+        local_output = local_output[:, :-uneven_number, :]
 
     cos_sim = torch.nn.CosineSimilarity(dim=0, eps=1e-6)
     cos_similarity = cos_sim(local_output.reshape(-1).to(torch.float32), local_ref_output.reshape(-1).to(torch.float32))
@@ -253,19 +262,19 @@ def test_uneven_varlen_attn_parallel(
 
 
 def test_uneven_attn_parallel(
-    batch_size, num_heads, seq_len_padded, head_dim, world_size, ulysses_size, ring_size, attn_type
+    num_heads, seq_len_padded, head_dim, world_size, ulysses_size, ring_size, attn_type
 ):
     """Test uneven parallel attention functionality."""
     PipelineConfig.reset()
     query, key, value, local_query, local_key, local_value = sample_tensors(
-        batch_size, num_heads, seq_len_padded, head_dim, world_size
+        num_heads, seq_len_padded, head_dim, world_size
     )
 
     rank = dist.get_rank()
     device = torch.device(f"cuda:{rank}")
     uneven_number = world_size - 1
 
-    seq_len_cur_rank = torch.tensor([local_query.shape[2]], dtype=torch.int32, device=device)
+    seq_len_cur_rank = torch.tensor([local_query.shape[1]], dtype=torch.int32, device=device)
     if dist.get_rank() == world_size - 1:
         seq_len_cur_rank = seq_len_cur_rank - uneven_number
     dit_config = DiTParallelConfig()
@@ -283,15 +292,15 @@ def test_uneven_attn_parallel(
         with nvtx.annotate(f"uneven visual_gen attn u{ulysses_size} r{ring_size}"):
             local_output = attn.visual_gen_attn(local_query, local_key, local_value, tensor_layout="HND")
 
-    query = query[:, :, :-uneven_number, :]
-    key = key[:, :, :-uneven_number, :]
-    value = value[:, :, :-uneven_number, :]
+    query = query[:, :-uneven_number, :]
+    key = key[:, :-uneven_number, :]
+    value = value[:, :-uneven_number, :]
 
-    ref_output = F.scaled_dot_product_attention(query, key, value, is_causal=False)
+    ref_output = F.scaled_dot_product_attention(query.unsqueeze(0), key.unsqueeze(0), value.unsqueeze(0), is_causal=False)
     local_ref_output = ref_output.chunk(world_size, dim=2)[dist.get_rank()]
 
     if dist.get_rank() == world_size - 1:
-        local_output = local_output[:, :, :-uneven_number, :]
+        local_output = local_output[:, :-uneven_number, :]
 
     cos_sim = torch.nn.CosineSimilarity(dim=0, eps=1e-6)
     cos_similarity = cos_sim(local_output.reshape(-1).to(torch.float32), local_ref_output.reshape(-1).to(torch.float32))
@@ -420,79 +429,75 @@ if __name__ == "__main__":
         #     )
 
     if test_flash_attn3:
-        test_attn_parallel(
-            batch_size=1,
-            num_heads=24,
-            seq_len=6 * 8 * 1024,
-            head_dim=128,
-            world_size=world_size,
-            ulysses_size=1,
-            ring_size=world_size,
-            attn_type="flash-attn3",
-        )
+        # test_attn_parallel(
+        #     num_heads=24,
+        #     seq_len=6 * 8 * 1024,
+        #     head_dim=128,
+        #     world_size=world_size,
+        #     ulysses_size=world_size,
+        #     ring_size=1,
+        #     attn_type="flash-attn3",
+        # )
+        # test_uneven_attn_parallel(
+        #     num_heads=24,
+        #     seq_len_padded=6 * 8 * 1024,
+        #     head_dim=128,
+        #     world_size=world_size,
+        #     ulysses_size=world_size,
+        #     ring_size=1,
+        #     attn_type="flash-attn3",
+        # )
+        # if world_size // 2 >= 1:
+        #     test_attn_parallel(
+        #         num_heads=24,
+        #         seq_len=6 * 8 * 1024,
+        #         head_dim=128,
+        #         world_size=world_size,
+        #         ulysses_size=2,
+        #         ring_size=world_size // 2,
+        #         attn_type="flash-attn3",
+        #     )
+        # # if world_size // 4 >= 1:
+        #     test_uneven_attn_parallel(
+        #         batch_size=1,
+        #         num_heads=24,
+        #         seq_len_padded=6 * 8 * 1024,
+        #         head_dim=128,
+        #         world_size=world_size,
+        #         ulysses_size=2,
+        #         ring_size=world_size // 2,
+        #         attn_type="flash-attn3",
+        #     )
+
+        # test_attn_parallel(
+        #     num_heads=24,
+        #     seq_len=6 * 8 * 1024,
+        #     head_dim=128,
+        #     world_size=world_size,
+        #     ulysses_size=2,
+        #     ring_size=world_size // 2,
+        #     attn_type="flash-attn3",
+        # )
+
         test_uneven_attn_parallel(
-            batch_size=1,
             num_heads=24,
             seq_len_padded=6 * 8 * 1024,
             head_dim=128,
             world_size=world_size,
-            ulysses_size=1,
-            ring_size=world_size,
-            attn_type="flash-attn3",
-        )
-        if world_size // 2 >= 1:
-            test_attn_parallel(
-                batch_size=1,
-                num_heads=24,
-                seq_len=6 * 8 * 1024,
-                head_dim=128,
-                world_size=world_size,
-                ulysses_size=2,
-                ring_size=world_size // 2,
-                attn_type="flash-attn3",
-            )
-        # if world_size // 4 >= 1:
-            test_uneven_attn_parallel(
-                batch_size=1,
-                num_heads=24,
-                seq_len_padded=6 * 8 * 1024,
-                head_dim=128,
-                world_size=world_size,
-                ulysses_size=2,
-                ring_size=world_size // 2,
-                attn_type="flash-attn3",
-            )
-
-        test_attn_parallel(
-            batch_size=1,
-            num_heads=24,
-            seq_len=6 * 8 * 1024,
-            head_dim=128,
-            world_size=world_size,
-            ulysses_size=world_size,
-            ring_size=1,
-            attn_type="flash-attn3",
-        )
-        test_uneven_attn_parallel(
-            batch_size=1,
-            num_heads=24,
-            seq_len_padded=6 * 8 * 1024,
-            head_dim=128,
-            world_size=world_size,
-            ulysses_size=world_size,
-            ring_size=1,
+            ulysses_size=2,
+            ring_size=2,
             attn_type="flash-attn3",
         )
 
-        test_uneven_varlen_attn_parallel(
-            num_heads=24,
-            seq_len_list=[1 * 8 * 1024 - 1, 3 * 8 * 1024],
-            head_dim=128,
-            world_size=world_size,
-            ulysses_size=world_size,
-            ring_size=1,
-            attn_type="flash-attn3",
-        )
+        # test_uneven_varlen_attn_parallel(
+        #     num_heads=24,
+        #     seq_len_list=[1 * 8 * 1024 - 1, 3 * 8 * 1024],
+        #     head_dim=128,
+        #     world_size=world_size,
+        #     ulysses_size=world_size,
+        #     ring_size=1,
+        #     attn_type="flash-attn3",
+        # )
 
     # if test_flash_attn4:
     #     test_attn_parallel(

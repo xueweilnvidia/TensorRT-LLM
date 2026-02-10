@@ -106,23 +106,20 @@ class PipelineConfig:
         seq_len_cur_rank = torch.tensor([seq_len_cur_rank], dtype=torch.int32, device=device)
         gather_list = [torch.empty_like(seq_len_cur_rank) for _ in range(torch.distributed.get_world_size())]
         torch.distributed.all_gather(gather_list, seq_len_cur_rank)
-        cls.seq_len_all_ranks = torch.cat(gather_list, dim=0).cpu()
+        cls.seq_len_all_ranks = torch.cat(gather_list, dim=0).cpu()  # parameters passed in 
 
+        if ditParallelConfig.ring_size() == 1:
+            return
         if ditParallelConfig.ulysses_size() == 1:
             cls.seq_len_cur_ring_group = cls.seq_len_all_ranks[torch.tensor(ditParallelConfig.ring_ranks())]
             return
-        if ditParallelConfig.ring_size() == 1:
-            seq_len_cur_ulysses_group = cls.seq_len_all_ranks[torch.tensor(ditParallelConfig.ulysses_ranks())]
-            cls.ulysses_seq_all_ring_ranks = [torch.sum(seq_len_cur_ulysses_group, dtype=torch.int32)]
-            return
 
-        cls.seq_len_cur_ring_group = cls.seq_len_all_ranks[torch.tensor(ditParallelConfig.ring_ranks())]
         seq_len_cur_ulysses_group = cls.seq_len_all_ranks[torch.tensor(ditParallelConfig.ulysses_ranks())]
-        ulysses_seq_cur_ring_rank = torch.sum(seq_len_cur_ulysses_group, dtype=torch.int32).to(device)
+        ring_seq_cur_ring_rank = torch.sum(seq_len_cur_ulysses_group, dtype=torch.int32).to(device)
         gather_list = [torch.empty(1, dtype=torch.int32, device=device) for _ in range(ditParallelConfig.ring_size())]
-        # print(f"ulysses_seq_cur_ring_rank: {ulysses_seq_cur_ring_rank}")
-        torch.distributed.all_gather(gather_list, ulysses_seq_cur_ring_rank, group=ditParallelConfig.ring_group())
-        cls.ulysses_seq_all_ring_ranks = torch.cat(gather_list, dim=0)
+
+        torch.distributed.all_gather(gather_list, ring_seq_cur_ring_rank, group=ditParallelConfig.ring_group())
+        cls.seq_len_cur_ring_group = torch.cat(gather_list, dim=0)
 
     @classmethod
     def get_config(cls):

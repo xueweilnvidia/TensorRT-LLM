@@ -90,7 +90,7 @@ def all_to_all(tensor, scatter_idx, gather_idx, tensor_layout, group=None, int8_
         output = torch.empty_like(tensor)
         dist.all_to_all_single(output, tensor, group=group)
 
-    # output: e.g., [world_size, B, chunked_H, chunked_S, D] if scatter_idx == 1, gather_idx == 2 -> [B, chunked_H, S, D]
+    # output: e.g., [world_size, chunked_H, chunked_S, D] if scatter_idx == 0, gather_idx == 1 -> [chunked_H, S, D]
     def reorder_tensor(tensor, gather_idx):
         t_shape = list(tensor.shape)
         world_size = t_shape[0]
@@ -147,28 +147,34 @@ def ulysses_a2a_in(
         raise NotImplementedError("Attn mask not supported for ulysses_a2a_in")
 
     if tensor_layout == "HND":
-        scatter_idx = 1
-        gather_idx = 2
-    elif tensor_layout == "NHD":
-        scatter_idx = 2
+        scatter_idx = 0
         gather_idx = 1
+    elif tensor_layout == "NHD":
+        scatter_idx = 1
+        gather_idx = 0
     else:
         raise ValueError(f"Invalid tensor layout: {tensor_layout}")
 
-    # [B, H, S/N, D] -> [B, H/N, S, D]
+    # [H, S/N, D] -> [H/N, S, D]
     if fuse_qkv:
-        # Fused communication: concatenate q/k/v into [3*B, H, S/N, D], single all-to-all, then split
+        # Fused communication: concatenate q/k/v into [3, H, S/N, D], single all-to-all, then split
         # This reduces 3 NCCL calls to 1, improving efficiency
+        query = torch.unsqueeze(query, 0)
+        key = torch.unsqueeze(key, 0)
+        value = torch.unsqueeze(value, 0)
         qkv = torch.cat([query, key, value], dim=0)
         qkv = all_to_all(
             qkv,
-            scatter_idx=scatter_idx,
-            gather_idx=gather_idx,
+            scatter_idx=scatter_idx + 1,
+            gather_idx=gather_idx + 1,
             group=ulysses_group,
             tensor_layout=tensor_layout,
             int8_comm=int8_all2all,
         )
         query, key, value = torch.chunk(qkv, 3, dim=0)
+        query = query.squeeze(0)
+        key = key.squeeze(0)
+        value = value.squeeze(0)
     else:
         # Independent communication: 3 separate all-to-all operations (default, safe)
         query = all_to_all(
@@ -205,14 +211,14 @@ def ulysses_a2a_out(output, tensor_layout, ulysses_size=1, ulysses_group=None, i
 
     assert tensor_layout in ["NHD", "HND"], f"tensor_layout must be NHD or HND, but got {tensor_layout}"
     if tensor_layout == "HND":
-        scatter_idx = 2
-        gather_idx = 1
-    elif tensor_layout == "NHD":
         scatter_idx = 1
-        gather_idx = 2
+        gather_idx = 0
+    elif tensor_layout == "NHD":
+        scatter_idx = 0
+        gather_idx = 1
     else:
         raise ValueError(f"Invalid tensor layout: {tensor_layout}")
-    # [B, H/N, S, D] -> [B, H, S/N, D]
+    # [H/N, S, D] -> [H, S/N, D]
     output = all_to_all(
         output,
         scatter_idx=scatter_idx,
@@ -272,15 +278,14 @@ def ulysses_wrapper(func):
         ulysses_rank = get_dit_parallel_config().ulysses_rank()
         ulysses_group = get_dit_parallel_config().ulysses_group()
         ring_size = get_dit_parallel_config().ring_size()
-        cp_size = get_dit_parallel_config().cp_size()
 
         assert tensor_layout in ["NHD", "HND"], f"tensor_layout must be NHD or HND, but got {tensor_layout}"
         if tensor_layout == "HND":
-            seq_dim = 2
-            head_dim = 1
-        elif tensor_layout == "NHD":
             seq_dim = 1
-            head_dim = 2
+            head_dim = 0
+        elif tensor_layout == "NHD":
+            seq_dim = 0
+            head_dim = 1
         else:
             raise ValueError(f"Invalid tensor layout: {tensor_layout}")
 
@@ -314,67 +319,31 @@ def ulysses_wrapper(func):
         # truncate and pad if cp is uneven
         truncate_and_pad = PipelineConfig.seq_len_all_ranks is not None
 
-        if truncate_and_pad:
-            if ring_size == 1:
-                # there is no ring, so we can use PipelineConfig.seq_len to do truncate and pad
-                seq_len = PipelineConfig.ulysses_seq_all_ring_ranks[0]
+        if ring_size == 1 and truncate_and_pad:
 
-                # Truncate key and value tensors using torch.narrow
-                key = torch.narrow(key, seq_dim, 0, seq_len).contiguous()
-                value = torch.narrow(value, seq_dim, 0, seq_len).contiguous()
-            else:
-                # there is ring, so we use the q_seq and kv_seq passed in by ring in kwargs to do truncate and pad
-                q_seq = kwargs.get("q_seq_len")
-                kv_seq = kwargs.get("kv_seq_len")
+            # there is no ring, so we can use PipelineConfig.seq_len to do truncate and pad
+            seq_len = PipelineConfig.seq_len
 
-                # Truncate key and value tensors using torch.narrow
-                key = torch.narrow(key, seq_dim, 0, kv_seq).contiguous()
-                value = torch.narrow(value, seq_dim, 0, kv_seq).contiguous()
-                kwargs.pop("q_seq_len")
-                kwargs.pop("kv_seq_len")
+            # Truncate key and value tensors using torch.narrow
+            key = torch.narrow(key, seq_dim, 0, seq_len).contiguous()
+            value = torch.narrow(value, seq_dim, 0, seq_len).contiguous()
+
 
         # Call the original function
         result = func(self, query, key, value, tensor_layout, attn_mask, **kwargs)
-        if ring_size == 1:
-            # if ring size is 1, return_lse is false, result only has output.
-            if truncate_and_pad:
-                # Zero out padding using torch.narrow
-                if result.shape[seq_dim] > seq_len:
-                    padding_part = torch.narrow(result, seq_dim, seq_len, result.shape[seq_dim] - seq_len)
-                    padding_part.zero_()
-            result = ulysses_a2a_out(
-                result, tensor_layout, ulysses_size=ulysses_size, ulysses_group=ulysses_group, int8_all2all=int8_all2all
-            )
 
-            return result
-        else:
-            # if ring size is not 1, return_lse is true, result has output and softmax_lse.
-            block_out = result[0]
-            block_lse = result[1]
-            if truncate_and_pad:
-                # Zero out padding using torch.narrow
-                if block_out.shape[seq_dim] > q_seq:
-                    padding_part = torch.narrow(block_out, seq_dim, q_seq, block_out.shape[seq_dim] - q_seq)
-                    padding_part.zero_()
+        # if ring size is 1, return_lse is false, result only has output.
+        if ring_size == 1 and truncate_and_pad and result.shape[seq_dim] > seq_len:
+            # Zero out padding using torch.narrow
+            padding_part = torch.narrow(result, seq_dim, seq_len, result.shape[seq_dim] - seq_len)
+            padding_part.zero_()
 
-                if block_lse.shape[seq_dim] > q_seq:
-                    padding_part = torch.narrow(block_lse, seq_dim, q_seq, block_lse.shape[seq_dim] - q_seq)
-                    padding_part.zero_()
-            block_out = ulysses_a2a_out(
-                block_out,
-                tensor_layout,
-                ulysses_size=ulysses_size,
-                ulysses_group=ulysses_group,
-                int8_all2all=int8_all2all,
-            )
-            block_lse = ulysses_a2a_out(
-                block_lse,
-                tensor_layout,
-                ulysses_size=ulysses_size,
-                ulysses_group=ulysses_group,
-                int8_all2all=int8_all2all,
-            )
-            return (block_out, block_lse)
+        result = ulysses_a2a_out(
+            result, tensor_layout, ulysses_size=ulysses_size, ulysses_group=ulysses_group, int8_all2all=int8_all2all
+        )
+
+        return result
+       
 
     return wrapper
 
@@ -385,7 +354,6 @@ def get_kv_rank(ring_size, ring_rank, cur_iter):
 
 
 def ring_wrapper(func):
-    # @torch.cuda.nvtx.range("ditAttn.ring_wrapper")
     def wrapper(self, query, key, value, tensor_layout, attn_mask=None, **kwargs):
 
         ring_size = get_dit_parallel_config().ring_size()
@@ -413,12 +381,12 @@ def ring_wrapper(func):
 
         # Determine sequence dimension based on tensor layout
         if tensor_layout == "HND":
-            seq_dim = 2  # kv_inputs is [2, B, H, S, D], so seq_dim is 3
+            seq_dim = 1  # kv_inputs is [2, H, S, D], so seq_dim is 2
         elif tensor_layout == "NHD":
-            seq_dim = 1  # kv_inputs is [2, B, S, H, D], so seq_dim is 2
+            seq_dim = 0  # kv_inputs is [2, S, H, D], so seq_dim is 1
         else:
-            # Default to dimension 3 for backward compatibility
-            seq_dim = 2
+            # Default to dimension 2 for backward compatibility
+            seq_dim = 1
 
         p2p_comm_buffers = [None, None]
         p2p_comm_buffers[0] = torch.cat((key.unsqueeze(0), value.unsqueeze(0)), dim=0)
@@ -439,19 +407,15 @@ def ring_wrapper(func):
                 )
             kv_inputs = p2p_comm_buffers[i % 2]
 
-            # do truncate and pad if cp is uneven and ulysses size is 1,
-            # if ulysses size > 1, truncate and pad will be done in ulysses_wrapper.
-            if PipelineConfig.seq_len_cur_ring_group is not None:
-                if ulysses_size == 1:
-                    # seq_dim+1 because kv_inputs is concated to [2, B, H, S, D] or [2, B, S, H, D]
-                    if kv_inputs.shape[seq_dim + 1] != PipelineConfig.seq_len_cur_ring_group[kv_rank]:
-                        # Truncate kv_inputs using torch.narrow
-                        kv_inputs = torch.narrow(
-                            kv_inputs, seq_dim + 1, 0, PipelineConfig.seq_len_cur_ring_group[kv_rank]
-                        )
-                else:
-                    kwargs["q_seq_len"] = PipelineConfig.ulysses_seq_all_ring_ranks[rank]
-                    kwargs["kv_seq_len"] = PipelineConfig.ulysses_seq_all_ring_ranks[kv_rank]
+            # do truncate and pad if cp is uneven,
+            if PipelineConfig.seq_len_cur_ring_group is not None:    
+                # seq_dim+1 because kv_inputs is concated to [2, H, S, D] or [2, S, H, D]
+                if kv_inputs.shape[seq_dim + 1] != PipelineConfig.seq_len_cur_ring_group[kv_rank]:
+                    # Truncate kv_inputs using torch.narrow
+                    kv_inputs = torch.narrow(
+                        kv_inputs, seq_dim + 1, 0, PipelineConfig.seq_len_cur_ring_group[kv_rank]
+                    )
+                
 
             kwargs["return_lse"] = True
             with torch.cuda.device(
@@ -472,16 +436,15 @@ def ring_wrapper(func):
 
         # Determine output sequence dimension based on tensor layout (for output tensor)
         if tensor_layout == "HND":
-            out_seq_dim = 2  # out is [B, H, S, D], so seq_dim is 2
+            out_seq_dim = 1  # out is [H, S, D], so seq_dim is 1
         elif tensor_layout == "NHD":
-            out_seq_dim = 1  # out is [B, S, H, D], so seq_dim is 1
+            out_seq_dim = 0  # out is [S, H, D], so seq_dim is 0
         else:
-            # Default to dimension 2 for backward compatibility
-            out_seq_dim = 2
+            # Default to dimension 1 for backward compatibility
+            out_seq_dim = 1
 
         if (
             PipelineConfig.seq_len_cur_ring_group is not None
-            and ulysses_size == 1
             and out.shape[out_seq_dim] > PipelineConfig.seq_len_cur_ring_group[rank]
         ):
             # Zero out padding using torch.narrow

@@ -94,8 +94,8 @@ class ditAttnProcessor:
             self.cached_attn_impl[attn_type] = AttentionOpManager.get_impl(attn_type)
         self.attn_impl = self.cached_attn_impl[attn_type]
 
-    @ring_wrapper
     @ulysses_wrapper
+    @ring_wrapper
     @cp_wrapper
     @joint_sequence_wrapper
     def visual_gen_attn(
