@@ -95,6 +95,47 @@ class PipelineConfig:
             else:
                 raise AttributeError(f"'{cls.__name__}' has no attribute '{key}'")
 
+    
+    @classmethod
+    def set_varlen_uneven_cp_config(cls, cu_seqlens_q_all_ranks, cu_seqlens_kv_all_ranks, max_seq_len_q, max_seq_len_kv, ditParallelConfig):     
+
+        if ditParallelConfig.ring_size() == 1:
+            return
+
+        if ditParallelConfig.ulysses_size() == 1:
+            cls.cu_seqlens_q_cur_ring_group = cu_seqlens_q_all_ranks
+            cls.cu_seqlens_kv_cur_ring_group = cu_seqlens_kv_all_ranks
+            cls.max_seq_len_q_cur_ring_group = max_seq_len_q
+            cls.max_seq_len_kv_cur_ring_group = max_seq_len_kv
+            return
+
+        # cls.cu_seqlens_q_cur_ulysses_group = cu_seqlens_q_all_ranks[ditParallelConfig.ulysses_ranks()]
+        # cls.cu_seqlens_kv_cur_ulysses_group = cu_seqlens_kv_all_ranks[ditParallelConfig.ulysses_ranks()]
+
+        # cu_seqlens_q_cur_ring_rank = cls.cu_seqlens_q_cur_ulysses_group.sum(dim=0).to(torch.int32)
+        # cu_seqlens_kv_cur_ring_rank = cls.cu_seqlens_kv_cur_ulysses_group.sum(dim=0).to(torch.int32)
+
+        # gather_list = [torch.empty_like(cu_seqlens_q_cur_ring_rank) for _ in range(ditParallelConfig.ring_size())]
+        # torch.distributed.all_gather(gather_list, cu_seqlens_q_cur_ring_rank, group=ditParallelConfig.ring_group())
+        # cls.cu_seqlens_q_cur_ring_group = torch.stack(gather_list, dim=0)
+
+        # gather_list = [torch.empty_like(cu_seqlens_kv_cur_ring_rank) for _ in range(ditParallelConfig.ring_size())]
+        # torch.distributed.all_gather(gather_list, cu_seqlens_kv_cur_ring_rank, group=ditParallelConfig.ring_group())
+        # cls.cu_seqlens_kv_cur_ring_group = torch.stack(gather_list, dim=0)
+ 
+
+        # print(f"cu_seqlens_q_cur_ring_group: {cls.cu_seqlens_q_cur_ring_group}, cu_seqlens_kv_cur_ring_group: {cls.cu_seqlens_kv_cur_ring_group}")
+
+        # cls.max_seq_len_q_cur_ring_group = max_seq_len_q * ditParallelConfig.ulysses_size()
+        # cls.max_seq_len_kv_cur_ring_group = max_seq_len_kv * ditParallelConfig.ulysses_size()
+
+
+        # cls.cu_seqlens_q_cur_ulysses_group = cls.cu_seqlens_q_cur_ulysses_group.to("cpu").to(torch.long)
+        # cls.cu_seqlens_kv_cur_ulysses_group = cls.cu_seqlens_kv_cur_ulysses_group.to("cpu").to(torch.long)
+
+
+
+    
     @classmethod
     def set_uneven_cp_config(cls, seq_len, seq_len_padded, seq_len_cur_rank, ditParallelConfig):
 

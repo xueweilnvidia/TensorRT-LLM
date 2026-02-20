@@ -28,6 +28,7 @@ from visual_gen.utils.logger import get_logger
 logger = get_logger(__name__)
 
 
+
 def all_to_all(tensor, scatter_idx, gather_idx, tensor_layout, group=None, int8_comm=False):
     """Perform all-to-all communication on a tensor.
 
@@ -72,23 +73,33 @@ def all_to_all(tensor, scatter_idx, gather_idx, tensor_layout, group=None, int8_
         return tensor
 
     # chunk tensor for all_to_all
-    if int8_comm:
-        original_dtype = tensor.dtype
-        # Quantize and pack in one step: output shape [..., seq_len, 132]
-        # 132 = 128 bytes (int8 data) + 4 bytes (float32 scale)
-        packed_tensor = quantize_per_token_block128_packed(tensor, tensor_layout=tensor_layout)
-        packed_tensor = chunk_tensor(packed_tensor, scatter_idx)
+    tensor = chunk_tensor(tensor, scatter_idx)
 
-        # Perform single all_to_all communication on packed tensor
-        output_packed = torch.empty_like(packed_tensor)
-        dist.all_to_all_single(output_packed, packed_tensor, group=group)
+    # Perform all2all
+    output = torch.empty_like(tensor)
+    dist.all_to_all_single(output, tensor, group=group)
 
-    else:
-        tensor = chunk_tensor(tensor, scatter_idx)
 
-        # Perform all2all
-        output = torch.empty_like(tensor)
-        dist.all_to_all_single(output, tensor, group=group)
+    # def reorder_tensor_varlen(tensor, gather_idx, cu_seqlens_cur_ulysses_group):
+
+    #     reorder_list = []
+    #     for i in range(world_size):
+    #         tensor_tmp = tensor[i]
+    #         print(f"tensor_tmp.shape: {tensor_tmp.shape}, cu_seqlens_cur_ulysses_group[i]: {cu_seqlens_cur_ulysses_group[i]}")
+    #         print(f"gather_idx: {gather_idx}")
+    #         tensor_chunks = torch.tensor_split(tensor_tmp, cu_seqlens_cur_ulysses_group[i][1:-1], dim=gather_idx)
+    #         reorder_list.append(tensor_chunks)
+
+    #     concat_list = []
+    #     for j in range(len(reorder_list[0])):
+    #         for i in range(world_size):
+    #             output_tmp = reorder_list[i][j]
+    #             concat_list.append(output_tmp)
+
+    #     result = torch.cat(concat_list, dim=gather_idx)
+
+    #     return result
+
 
     # output: e.g., [world_size, chunked_H, chunked_S, D] if scatter_idx == 0, gather_idx == 1 -> [chunked_H, S, D]
     def reorder_tensor(tensor, gather_idx):
@@ -115,15 +126,11 @@ def all_to_all(tensor, scatter_idx, gather_idx, tensor_layout, group=None, int8_
 
         return tensor
 
-    if int8_comm:
-        # Reorder packed tensor
-        output_packed = reorder_tensor(output_packed, gather_idx)
-        # Dequantize packed tensor in one step
-        output = dequantize_per_token_block128_packed(output_packed, tensor_layout=tensor_layout)
-        if output.dtype != original_dtype:
-            output = output.to(original_dtype)
-    else:
-        output = reorder_tensor(output, gather_idx)
+    
+    # if cu_seqlens_cur_ulysses_group is not None:
+    #     output = reorder_tensor_varlen(output, gather_idx, cu_seqlens_cur_ulysses_group)
+    # else:
+    output = reorder_tensor(output, gather_idx)
 
     return output
 
@@ -415,6 +422,21 @@ def ring_wrapper(func):
                     kv_inputs = torch.narrow(
                         kv_inputs, seq_dim + 1, 0, PipelineConfig.seq_len_cur_ring_group[kv_rank]
                     )
+
+            if PipelineConfig.cu_seqlens_q_cur_ring_group is not None:
+                cu_seqlens_q = PipelineConfig.cu_seqlens_q_cur_ring_group[rank]
+                cu_seqlens_kv = PipelineConfig.cu_seqlens_kv_cur_ring_group[kv_rank]
+                kwargs["cu_seqlens_q"] = cu_seqlens_q
+                kwargs["cu_seqlens_k"] = cu_seqlens_kv
+
+                if kv_inputs.shape[seq_dim + 1] != cu_seqlens_kv[-1]:
+                    # Truncate kv_inputs using torch.narrow
+                    kv_inputs = torch.narrow(
+                        kv_inputs, seq_dim + 1, 0, cu_seqlens_kv[-1]
+                    )
+
+                kwargs["max_seqlen_q"] = PipelineConfig.max_seq_len_q_cur_ring_group
+                kwargs["max_seqlen_k"] = PipelineConfig.max_seq_len_kv_cur_ring_group
                 
 
             kwargs["return_lse"] = True
@@ -443,12 +465,16 @@ def ring_wrapper(func):
             # Default to dimension 1 for backward compatibility
             out_seq_dim = 1
 
-        if (
-            PipelineConfig.seq_len_cur_ring_group is not None
-            and out.shape[out_seq_dim] > PipelineConfig.seq_len_cur_ring_group[rank]
-        ):
-            # Zero out padding using torch.narrow
+        
+        start_pos = out.shape[out_seq_dim]
+
+        if PipelineConfig.seq_len_cur_ring_group is not None and out.shape[out_seq_dim] > PipelineConfig.seq_len_cur_ring_group[rank]:
             start_pos = PipelineConfig.seq_len_cur_ring_group[rank]
+
+        if PipelineConfig.cu_seqlens_q_cur_ring_group is not None and out.shape[out_seq_dim] > PipelineConfig.cu_seqlens_q_cur_ring_group[rank][-1]:
+            start_pos = PipelineConfig.cu_seqlens_q_cur_ring_group[rank][-1]
+
+        if start_pos < out.shape[out_seq_dim]:
             padding_length = out.shape[out_seq_dim] - start_pos
             padding_part = torch.narrow(out, out_seq_dim, start_pos, padding_length)
             padding_part.zero_()

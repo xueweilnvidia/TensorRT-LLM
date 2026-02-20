@@ -739,7 +739,7 @@ class FlashAttn3(BaseAttn):
                 pack_gqa=None,
                 deterministic=False,
                 sm_margin=0,
-                return_attn_probs=False,
+                return_attn_probs=return_lse,
             )
 
         lse = None
